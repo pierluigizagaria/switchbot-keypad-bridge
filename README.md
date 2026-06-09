@@ -205,3 +205,15 @@ a keypad paired before an unpair can no longer command the bridge afterwards.
 - `FINAL_VALIDATE_SCHEMA` raises a hard error if `esp32_ble`,
   `esp32_ble_tracker`, `esp32_improv`, etc. are present in the config — NimBLE
   cannot coexist with ESPHome's BLE stack.
+
+## Support
+
+If this project saved you the cost of a SwitchBot Lock — or just made your day —
+consider buying me a coffee. It's a great way to say thanks and keep the work
+going.
+
+<p align="center">
+  <a href="https://buymeacoffee.com/pierluigizagaria">
+    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=pierluigizagaria&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me A Coffee">
+  </a>
+</p>
