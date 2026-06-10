@@ -71,8 +71,9 @@ const FamilyPreset &preset_for(KeypadFamily f) {
 }
 
 // Friendly step labels — kept short so the UI's progress card stays tidy.
-// Keep these in lock-step with the <ul class="stepper"> list in
-// pairing_ui.html: same count, same order, same wording.
+// The wizard fetches these through step_count()/step_label() (via the
+// /api/pair response) and builds its stepper from them, so this list is
+// the single source of truth for count, order and wording.
 constexpr const char *STEP_LABELS[] = {
     "Connecting to keypad",
     "Discovering services",
@@ -118,6 +119,12 @@ NimBLEAddress discover_target(const std::string &mac_pretty, uint32_t timeout_ms
 }  // namespace
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+uint8_t KeypadPairer::step_count() { return TOTAL_STEPS; }
+
+const char *KeypadPairer::step_label(uint8_t step) {
+  return step < TOTAL_STEPS ? STEP_LABELS[step] : "";
+}
 
 std::string KeypadPairer::start(Request req) {
   {

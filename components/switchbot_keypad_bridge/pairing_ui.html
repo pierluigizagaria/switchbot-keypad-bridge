@@ -581,6 +581,10 @@
     </div>
 
     <div class="card" id="progress-card-content">
+      <!-- Placeholder steps, shown only until POST /api/pair responds (and
+           in the file:// design preview). The live stepper is rebuilt from
+           the `labels` array in the /api/pair response — the firmware's
+           step list is the single source of truth, this one is cosmetic. -->
       <ul class="stepper" id="progress-stepper">
         <li class="step active"><span class="indicator"></span>Connecting to keypad</li>
         <li class="step"><span class="indicator"></span>Discovering services</li>
@@ -837,6 +841,13 @@
     try {
       const r = await api('POST', '/api/pair', { mac: kp.mac });
       jobId = r.job_id;
+      /* Rebuild the stepper from the firmware's own step list — the static
+         <li> items above are only a placeholder while this request runs. */
+      if (Array.isArray(r.labels) && r.labels.length) {
+        document.getElementById('progress-stepper').innerHTML = r.labels.map(l =>
+          '<li class="step"><span class="indicator"></span>' + escapeHtml(l) + '</li>'
+        ).join('');
+      }
     } catch (err) {
       showResultError(err.message);
       return;

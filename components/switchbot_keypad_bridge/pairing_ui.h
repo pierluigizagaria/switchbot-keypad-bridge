@@ -6,7 +6,7 @@
 //   GET  /                       → embedded HTML (single self-contained page)
 //   POST /api/login              → {email,password} → {region} | 401
 //   GET  /api/keypads            → [ {mac, name, model, online, rssi} ]
-//   POST /api/pair               → {mac} → {job_id}
+//   POST /api/pair               → {mac} → {job_id, labels: [step names]}
 //   GET  /api/pair/status        → {step, total, message, done, error}
 //
 // The server uses ESP-IDF's `esp_http_server` (already pulled in by NimBLE

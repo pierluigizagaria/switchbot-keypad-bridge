@@ -286,6 +286,12 @@ esp_err_t PairingUi::handle_pair_(httpd_req_t *req) {
   self->success_notified_    = false;
   cJSON *resp = cJSON_CreateObject();
   cJSON_AddStringToObject(resp, "job_id", job_id.c_str());
+  // Step labels for the progress stepper — the wizard renders these, so the
+  // pairer stays the single source of truth for count, order and wording.
+  cJSON *labels = cJSON_AddArrayToObject(resp, "labels");
+  for (uint8_t i = 0; i < KeypadPairer::step_count(); ++i) {
+    cJSON_AddItemToArray(labels, cJSON_CreateString(KeypadPairer::step_label(i)));
+  }
   return reply_json_(req, json_take(resp).c_str());
 }
 

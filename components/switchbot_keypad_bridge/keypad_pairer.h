@@ -71,6 +71,12 @@ class KeypadPairer {
   // untouched — only one pairing can be in flight at a time.
   std::string start(Request req);
 
+  // The user-facing label of each pairing step, in order. The wizard builds
+  // its progress stepper from these (returned by /api/pair), so the pairer
+  // is the single source of truth for step count, order and wording.
+  static uint8_t step_count();
+  static const char *step_label(uint8_t step);
+
   // Atomic snapshot of progress. Suitable for polling from any thread.
   Status status() const;
 
