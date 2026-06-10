@@ -341,13 +341,18 @@ std::string PairingUi::read_body_(httpd_req_t *req) {
   if (req->content_len == 0 || req->content_len > MAX_BODY_LEN) {
     return buf;
   }
+  // httpd_req_recv may legitimately return less than content_len (the body
+  // can arrive split across TCP segments), so keep reading until complete.
   buf.resize(req->content_len);
-  int received = httpd_req_recv(req, buf.data(),
-                                static_cast<int>(req->content_len));
-  if (received <= 0) {
-    buf.clear();
-  } else {
-    buf.resize(received);
+  size_t received = 0;
+  while (received < req->content_len) {
+    int r = httpd_req_recv(req, buf.data() + received,
+                           static_cast<int>(req->content_len - received));
+    if (r <= 0) {
+      buf.clear();
+      return buf;
+    }
+    received += static_cast<size_t>(r);
   }
   return buf;
 }
