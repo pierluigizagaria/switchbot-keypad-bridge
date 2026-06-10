@@ -9,9 +9,10 @@
 
 An [ESPHome](https://esphome.io/) external component that makes an ESP32
 impersonate a **SwitchBot Lock** over Bluetooth LE. A genuine SwitchBot Keypad
-pairs to it and sends its usual encrypted `lock` / `unlock` frames — the bridge
-decrypts them on the fly and hands them to Home Assistant. The keypad never
-knows it isn't talking to a real lock.
+pairs to it and sends its usual encrypted `lock` / `unlock` frames — plus the
+`doorbell` press on Keypad Vision — and the bridge decrypts them on the fly and
+hands them to Home Assistant. The keypad never knows it isn't talking to a real
+lock.
 
 ## Why use it
 
@@ -21,10 +22,13 @@ knows it isn't talking to a real lock.
   keypad, done. No Python script, no laptop, no BLE sniffing.
 - 👤 **Knows who unlocked** — every unlock carries the method (`pin` /
   `fingerprint` / `nfc` / `face`) and the credential slot, so you can act per user.
+- 🔔 **Doorbell, no lock needed** — on Keypad Vision the doorbell button is
+  enabled automatically during pairing (the app normally hides it until a lock
+  is bound) and each press fires its own Home Assistant event.
 - 🔐 **Keys never leave the device** — the AES-128 session key is generated on
   the ESP32 and stored in NVS; it is never in your YAML or git.
 - 🧩 **Pure ESPHome** — exposes a standard `event` entity plus `on_lock` /
-  `on_unlock` automation triggers. No cloud, no extra dependencies.
+  `on_unlock` / `on_doorbell` automation triggers. No cloud, no extra dependencies.
 
 ## Supported keypads
 
@@ -78,7 +82,7 @@ boot log, or use Home Assistant's **Visit Device** link on the device page):
 3. Wait for the wizard to finish — it closes itself when done.
 
 That's it. The keypad's name appears on the **Keypad** sensor and key presses
-arrive in Home Assistant as `Lock` / `Unlock` events.
+arrive in Home Assistant as `Lock` / `Unlock` / `Doorbell` events.
 
 > **Re-pairing** — to switch to a different keypad, press the **Unpair** button
 > in Home Assistant. The device forgets the current keypad, rotates its session
@@ -170,15 +174,50 @@ actions:
 Create one automation per credential to send tailored notifications or trigger
 different actions for each family member.
 
+## Doorbell (Keypad Vision)
+
+The Keypad Vision has a dedicated doorbell button. The official app only lets
+you enable it once a SwitchBot Lock is bound to your account — so the bridge
+turns it on for you, automatically, at the end of pairing. No lock required.
+
+Each press fires the `on_doorbell` trigger (no parameters) and a `Doorbell`
+event on the `event` entity. Forward it to Home Assistant the same way as an
+unlock:
+
+```yaml
+switchbot_keypad_bridge:
+  keypad_action:
+    name: "Action"
+
+  on_doorbell:
+    - homeassistant.event:
+        event: esphome.switchbot_keypad_doorbell
+```
+
+```yaml
+alias: Notify on keypad doorbell
+triggers:
+  - trigger: event
+    event_type: esphome.switchbot_keypad_doorbell
+actions:
+  - action: notify.mobile_app
+    data:
+      message: Someone's at the door
+```
+
+> The doorbell button exists only on the Vision family; the option is skipped
+> for Original / Touch keypads, which have no doorbell.
+
 ## Configuration reference
 
 | Option | Type | Required | Description |
 |---|---|---|---|
-| `keypad_action` | event | no | Standard ESPHome `event` entity for keypad actions. Surfaces in HA as `event.<device>_action` with `Lock` / `Unlock` event types. |
+| `keypad_action` | event | no | Standard ESPHome `event` entity for keypad actions. Surfaces in HA as `event.<device>_action` with `Lock` / `Unlock` / `Doorbell` event types. |
 | `keypad` | text_sensor | no | Text sensor whose state is the display name of the paired keypad (Configuration category; empty if none). |
 | `unpair_button` | button | no | Button that forgets the paired keypad, rotates the session key and re-opens the pairing wizard (no reboot). |
 | `on_lock` | automation | no | Triggered on every `lock` command. |
 | `on_unlock` | automation | no | Triggered on every `unlock` command — parameters `(std::string method, int index)`. |
+| `on_doorbell` | automation | no | Triggered on every doorbell press (Keypad Vision). No parameters. |
 
 ## How it works
 
