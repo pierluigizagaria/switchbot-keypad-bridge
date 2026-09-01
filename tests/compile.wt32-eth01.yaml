@@ -44,5 +44,5 @@ switchbot_keypad_bridge:
     name: Lock battery
   reset_button:
     name: Reset
-  lock_button:
-    name: Report locked
+  report_locked_button:
+    name: Sync locked state to keypad

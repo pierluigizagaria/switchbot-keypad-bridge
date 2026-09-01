@@ -324,9 +324,11 @@ class ResetButton : public button::Button, public Parented<SwitchbotKeypadBridge
   void press_action() override;
 };
 
-// Home Assistant button that reports the emulated lock as locked. Keypad
-// Vision uses this state to re-arm passive face recognition after an unlock.
-class LockButton : public button::Button, public Parented<SwitchbotKeypadBridge> {
+// Home Assistant button that reports the emulated lock as locked. It does not
+// operate a physical lock. Keypad Vision uses the reported state to re-arm
+// passive face recognition after an unlock.
+class ReportLockedButton : public button::Button,
+                           public Parented<SwitchbotKeypadBridge> {
  protected:
   void press_action() override;
 };

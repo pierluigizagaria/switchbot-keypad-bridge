@@ -418,8 +418,8 @@ void ResetButton::press_action() {
   this->parent_->reset_pairing();
 }
 
-void LockButton::press_action() {
-  ESP_LOGI(TAG, "Reporting emulated lock state as locked");
+void ReportLockedButton::press_action() {
+  ESP_LOGI(TAG, "Reporting locked state to the keypad");
   this->parent_->set_lock_state(true);
 }
 

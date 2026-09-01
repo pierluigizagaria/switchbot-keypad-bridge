@@ -260,7 +260,7 @@ switchbot_keypad_bridge:
 | `lock_battery_level` | sensor | no | Battery percentage of the linked physical lock, read from its BLE advertisement (Diagnostic category). |
 | `battery_scan_interval` | time | no | How often the bridge refreshes keypad and lock battery sensors with the shared advertisement scan. Default `15min`. |
 | `reset_button` | button | no | Button that forgets the linked keypad and lock, rotates the session key and re-opens the setup wizard (no reboot). |
-| `lock_button` | button | no | Reports the emulated lock as locked on the keypad's next state poll. Use it to synchronize an external lock and re-arm Keypad Vision face recognition. |
+| `report_locked_button` | button | no | Reports the emulated lock as locked on the keypad's next state poll. It does not operate a physical lock. Use it to synchronize an external lock and re-arm Keypad Vision face recognition. |
 | `on_lock` | automation | no | Triggered on every `lock` command. |
 | `on_unlock` | automation | no | Triggered on every `unlock` command — parameters `(std::string method, int index)`. |
 | `on_doorbell` | automation | no | Triggered on every doorbell press (Keypad Vision). No parameters. |
@@ -269,13 +269,13 @@ switchbot_keypad_bridge:
 
 Keypad Vision stops passive face recognition after a successful unlock until
 the paired lock reports that it is locked again. When Home Assistant controls a
-different physical lock, expose `lock_button` and press it whenever that lock
-reaches its locked state:
+different physical lock, expose `report_locked_button` and press it whenever
+that lock reaches its locked state:
 
 ```yaml
 switchbot_keypad_bridge:
-  lock_button:
-    name: "Report locked"
+  report_locked_button:
+    name: "Sync locked state to keypad"
 ```
 
 ```yaml
@@ -287,7 +287,7 @@ triggers:
 actions:
   - action: button.press
     target:
-      entity_id: button.switchbot_keypad_bridge_report_locked
+      entity_id: button.switchbot_keypad_bridge_sync_locked_state_to_keypad
 mode: queued
 ```
 

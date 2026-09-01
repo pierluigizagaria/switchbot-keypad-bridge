@@ -55,10 +55,11 @@ switchbot_keypad_bridge:
   reset_button:
     name: "Reset"
 
-  # Report the emulated lock as locked from Home Assistant. This re-arms
-  # passive face recognition on Keypad Vision after an unlock.
-  lock_button:
-    name: "Report locked"
+  # Report the emulated lock as locked from Home Assistant. This does not
+  # operate a physical lock; it re-arms passive face recognition on Keypad
+  # Vision after an unlock.
+  report_locked_button:
+    name: "Sync locked state to keypad"
 
   on_unlock:
     # method: "pin" | "fingerprint" | "nfc" | "face" | "unknown"   index: credential slot
