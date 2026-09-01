@@ -82,6 +82,14 @@ class SwitchbotKeypadBridge : public Component {
   // re-opens the setup wizard — no reboot. Invoked by ResetButton.
   void reset_pairing();
 
+  // Sets the state reported on the keypad's next state poll. This lets an
+  // external lock or door controller keep the emulated lock state in sync.
+  // ESPHome actions run on the main task, so mutating lock_state_ here follows
+  // the component's concurrency model.
+  void set_lock_state(bool locked) {
+    this->lock_state_ = locked ? LockState::LOCKED : LockState::UNLOCKED;
+  }
+
   void add_on_lock_callback(std::function<void()> &&callback) {
     this->on_lock_callbacks_.add(std::move(callback));
   }
@@ -312,6 +320,13 @@ class SwitchbotKeypadBridge : public Component {
 // Home Assistant reset button: forgets keypad and lock, rotates the shared key
 // and re-opens the setup wizard — all without a reboot.
 class ResetButton : public button::Button, public Parented<SwitchbotKeypadBridge> {
+ protected:
+  void press_action() override;
+};
+
+// Home Assistant button that reports the emulated lock as locked. Keypad
+// Vision uses this state to re-arm passive face recognition after an unlock.
+class LockButton : public button::Button, public Parented<SwitchbotKeypadBridge> {
  protected:
   void press_action() override;
 };
