@@ -6,6 +6,15 @@
 namespace esphome {
 namespace switchbot_keypad_bridge {
 
+template<typename... Ts> class RearmAction : public Action<Ts...> {
+ public:
+  explicit RearmAction(SwitchbotKeypadBridge *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->rearm(); }
+
+ protected:
+  SwitchbotKeypadBridge *parent_;
+};
+
 class LockTrigger : public Trigger<> {
  public:
   explicit LockTrigger(SwitchbotKeypadBridge *parent) {

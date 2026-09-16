@@ -232,6 +232,100 @@ switchbot_keypad_bridge:
 
 > Vision family only — Original / Touch keypads have no doorbell button.
 
+## Re-arming Keypad Vision
+
+After an unlock, Keypad Vision's passive face/hand recognition needs to see
+`LOCKED` again before it can scan again. If your external lock or garage door
+closes without pressing the keypad's Lock button, call
+`switchbot_keypad_bridge.rearm` to update the emulated lock state.
+
+This action reports `LOCKED` on the keypad's **next state poll**. It does not
+operate a physical lock, emit a `Lock` event, or trigger `on_lock`, even with
+physical lock relay enabled. It is not a command to start a scan immediately.
+
+### Call from Home Assistant
+
+Expose the local action through ESPHome's native API (merge these entries into
+your existing `switchbot_keypad_bridge:` and `api:` sections):
+
+```yaml
+switchbot_keypad_bridge:
+  id: keypad_bridge
+
+api:
+  actions:
+    - action: rearm_keypad
+      then:
+        - switchbot_keypad_bridge.rearm: keypad_bridge
+```
+
+Then call it when your actual lock reports that it is locked:
+
+```yaml
+alias: Re-arm SwitchBot keypad when the door locks
+triggers:
+  - trigger: state
+    entity_id: lock.front_door
+    to: "locked"
+actions:
+  - action: esphome.switchbot_keypad_bridge_rearm_keypad
+mode: single
+```
+
+The action name uses your ESPHome node name; adjust it if you renamed the
+device. For a garage door, use its confirmed `closed` state instead. Choose
+the signal that means your installation is ready for another unlock; a door
+contact being closed does not necessarily mean a deadbolt is locked.
+
+Local ESPHome automations (including sensor or MQTT callbacks) can call
+`switchbot_keypad_bridge.rearm` directly, without the native API or HA.
+
+### Optional automatic timer
+
+For installations that want time-based rearming, the bridge can rearm locally
+after the latest accepted keypad unlock, with no dependency on HA:
+
+```yaml
+switchbot_keypad_bridge:
+  id: keypad_bridge
+  auto_rearm_after: 20s
+```
+
+The default is `0s` (disabled). Every accepted unlock, regardless of method,
+restarts the countdown. Explicit rearm or a keypad Lock command cancels it.
+The timer survives BLE disconnects, but pairing reset or linking a new keypad
+cancels it. Reboots start with the emulated lock in its usual locked state;
+pending timers are not persisted. At expiry the bridge changes the state
+reported on the next keypad poll, so scanning is not guaranteed to resume
+at exactly the configured delay.
+
+The timer does not know whether the door is open or the physical lock has
+finished moving. Leave it disabled when rearming must follow confirmed
+closure. Enabling both a closure automation and the timer does not prevent
+the timer from rearming while the door is still open.
+
+### Optional button
+
+A Home Assistant dashboard button can call the API action above. To expose
+an ESPHome button entity instead, use the same local action:
+
+```yaml
+button:
+  - platform: template
+    name: "Rearm keypad"
+    icon: mdi:lock-check
+    on_press:
+      - switchbot_keypad_bridge.rearm: keypad_bridge
+```
+
+Building on the investigation in
+[#14](https://github.com/pierluigizagaria/switchbot-keypad-bridge/issues/14),
+the first pull request for locked-state synchronization was
+[#29 by Antti](https://github.com/pierluigizagaria/switchbot-keypad-bridge/pull/29),
+including documentation and an external-lock automation example, followed by
+[#30 by dr-apple](https://github.com/pierluigizagaria/switchbot-keypad-bridge/pull/30).
+Both contributions informed this shared action and optional timer.
+
 ## 🔋 Battery sensors
 
 The keypad and linked physical lock broadcast their battery levels in BLE
@@ -259,40 +353,15 @@ switchbot_keypad_bridge:
 | `keypad_battery_level` | sensor | no | Battery percentage of the linked keypad, read from its BLE advertisement (Diagnostic category). |
 | `lock_battery_level` | sensor | no | Battery percentage of the linked physical lock, read from its BLE advertisement (Diagnostic category). |
 | `battery_scan_interval` | time | no | How often the bridge refreshes keypad and lock battery sensors with the shared advertisement scan. Default `15min`. |
+| `auto_rearm_after` | time | no | Rearm locally after the latest accepted unlock. Default `0s` (disabled); for example `20s`. Does not track actual door/lock state. |
 | `reset_button` | button | no | Button that forgets the linked keypad and lock, rotates the session key and re-opens the setup wizard (no reboot). |
-| `report_locked_button` | button | no | Reports the emulated lock as locked on the keypad's next state poll. It does not operate a physical lock. Use it to synchronize an external lock and re-arm Keypad Vision face recognition. |
 | `on_lock` | automation | no | Triggered on every `lock` command. |
 | `on_unlock` | automation | no | Triggered on every `unlock` command — parameters `(std::string method, int index)`. |
 | `on_doorbell` | automation | no | Triggered on every doorbell press (Keypad Vision). No parameters. |
 
-### Synchronizing an external lock
-
-Keypad Vision stops passive face recognition after a successful unlock until
-the paired lock reports that it is locked again. When Home Assistant controls a
-different physical lock, expose `report_locked_button` and press it whenever
-that lock reaches its locked state:
-
-```yaml
-switchbot_keypad_bridge:
-  report_locked_button:
-    name: "Sync locked state to keypad"
-```
-
-```yaml
-alias: Re-arm SwitchBot keypad when the door locks
-triggers:
-  - trigger: state
-    entity_id: lock.front_door
-    to: "locked"
-actions:
-  - action: button.press
-    target:
-      entity_id: button.switchbot_keypad_bridge_sync_locked_state_to_keypad
-mode: queued
-```
-
-The button changes only the state reported to the keypad. It does not operate a
-linked physical lock.
+Automation action: `switchbot_keypad_bridge.rearm: <bridge_id>` (or
+`switchbot_keypad_bridge.rearm: {id: <bridge_id>}`) reports the emulated lock
+as locked and cancels pending automatic rearm. No button entity is required.
 
 ## 🔬 Under the hood
 

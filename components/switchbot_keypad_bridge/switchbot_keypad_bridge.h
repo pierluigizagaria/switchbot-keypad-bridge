@@ -21,6 +21,7 @@
 #include "esphome/core/preferences.h"
 
 #include "keypad_advert.h"
+#include "keypad_state.h"
 #include "lock_advert.h"
 #include "lock_protocol.h"
 #include "lock_session.h"
@@ -75,20 +76,17 @@ class SwitchbotKeypadBridge : public Component {
     this->pairing_ui_.set_html(html, len);
   }
   void set_battery_scan_interval(uint32_t ms) { this->battery_scan_interval_ms_ = ms; }
+  void set_auto_rearm_after(uint32_t ms) { this->keypad_state_.set_auto_rearm_after(ms); }
+
+  // Report LOCKED on the next keypad poll, without operating a physical lock
+  // or publishing a Lock event. Safe to call from local ESPHome automations.
+  void rearm();
 
   bool is_pairing_active() const { return this->pairing_ui_.is_running(); }
 
   // Forgets the linked keypad and lock, rotates the shared key in place and
   // re-opens the setup wizard — no reboot. Invoked by ResetButton.
   void reset_pairing();
-
-  // Sets the state reported on the keypad's next state poll. This lets an
-  // external lock or door controller keep the emulated lock state in sync.
-  // ESPHome actions run on the main task, so mutating lock_state_ here follows
-  // the component's concurrency model.
-  void set_lock_state(bool locked) {
-    this->lock_state_ = locked ? LockState::LOCKED : LockState::UNLOCKED;
-  }
 
   void add_on_lock_callback(std::function<void()> &&callback) {
     this->on_lock_callbacks_.add(std::move(callback));
@@ -107,11 +105,6 @@ class SwitchbotKeypadBridge : public Component {
   friend class ServerCallbacks;
   friend class RxCharCallbacks;
   friend class BatteryScanCallbacks;
-
-  enum class LockState : uint8_t {
-    LOCKED = 0x81,
-    UNLOCKED = 0x91,
-  };
 
   // Identity of the linked keypad, persisted to NVS at pairing time so the
   // battery scan can match its advertisement after a reboot. `valid == 0`
@@ -156,6 +149,7 @@ class SwitchbotKeypadBridge : public Component {
 
   void handle_command_(const FrameHeader &header, const DecodedCommand &command);
   void handle_state_poll_(const FrameHeader &header);
+  void update_auto_rearm_();
   // Builds the keypad-family reply for a command. Linked-lock mode still
   // answers the keypad locally; the physical relay runs independently.
   void send_local_response_(const FrameHeader &header, const DecodedCommand &command);
@@ -263,7 +257,7 @@ class SwitchbotKeypadBridge : public Component {
   // PSA AES-CTR key handle. Imported once at setup so the per-frame crypto
   // path does not pay the cost (or risk the failure) of re-importing it.
   psa_key_id_t aes_key_handle_{PSA_KEY_ID_NULL};
-  LockState lock_state_{LockState::LOCKED};
+  KeypadState keypad_state_{};
 
   // Keypad encrypted-session state (token slot, IV, anti-replay, transport
   // crypto). The IV may survive BLE reconnects when the keypad continues the
@@ -320,15 +314,6 @@ class SwitchbotKeypadBridge : public Component {
 // Home Assistant reset button: forgets keypad and lock, rotates the shared key
 // and re-opens the setup wizard — all without a reboot.
 class ResetButton : public button::Button, public Parented<SwitchbotKeypadBridge> {
- protected:
-  void press_action() override;
-};
-
-// Home Assistant button that reports the emulated lock as locked. It does not
-// operate a physical lock. Keypad Vision uses the reported state to re-arm
-// passive face recognition after an unlock.
-class ReportLockedButton : public button::Button,
-                           public Parented<SwitchbotKeypadBridge> {
  protected:
   void press_action() override;
 };
