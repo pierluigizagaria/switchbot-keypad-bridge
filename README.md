@@ -245,44 +245,6 @@ This action reports `LOCKED` on the keypad's **next state poll**. It does not
 operate a physical lock, emit a `Lock` event, or trigger `on_lock`, even with
 physical lock relay enabled. It is not a command to start a scan immediately.
 
-### Call from Home Assistant
-
-Expose the local action through ESPHome's native API (merge these entries into
-your existing `switchbot_keypad_bridge:` and `api:` sections):
-
-```yaml
-switchbot_keypad_bridge:
-  id: keypad_bridge
-  rearm_after: 0s  # Rearm only when the actual lock/door closes.
-
-api:
-  actions:
-    - action: rearm_keypad
-      then:
-        - switchbot_keypad_bridge.rearm: keypad_bridge
-```
-
-Then call it when your actual lock reports that it is locked:
-
-```yaml
-alias: Re-arm SwitchBot keypad when the door locks
-triggers:
-  - trigger: state
-    entity_id: lock.front_door
-    to: "locked"
-actions:
-  - action: esphome.switchbot_keypad_bridge_rearm_keypad
-mode: single
-```
-
-The action name uses your ESPHome node name; adjust it if you renamed the
-device. For a garage door, use its confirmed `closed` state instead. Choose
-the signal that means your installation is ready for another unlock; a door
-contact being closed does not necessarily mean a deadbolt is locked.
-
-Local ESPHome automations (including sensor or MQTT callbacks) can call
-`switchbot_keypad_bridge.rearm` directly, without the native API or HA.
-
 ### Automatic rearm delay
 
 `rearm_after` controls when passive face/palm unlock can rearm on Keypad
@@ -312,17 +274,42 @@ the timer from rearming while the door is still open.
 
 ### Optional button
 
-A Home Assistant dashboard button can call the API action above. To expose
-an ESPHome button entity instead, use the same local action:
+Uncomment this example to expose a button in Home Assistant. Pressing it
+calls the same `switchbot_keypad_bridge.rearm` action:
 
 ```yaml
-button:
-  - platform: template
-    name: "Rearm keypad"
-    icon: mdi:lock-check
-    on_press:
-      - switchbot_keypad_bridge.rearm: keypad_bridge
+# Optional button to manually rearm face/palm unlock.
+# button:
+#   - platform: template
+#     name: "Rearm keypad"
+#     icon: mdi:lock-check
+#     on_press:
+#       - switchbot_keypad_bridge.rearm: keypad_bridge
 ```
+
+Local ESPHome automations (including sensor or MQTT callbacks) can also call
+`switchbot_keypad_bridge.rearm` directly.
+
+To rearm only when your actual lock reports that it is locked, set
+`rearm_after: 0s`, enable the button above, and use a Home Assistant automation:
+
+```yaml
+alias: Re-arm SwitchBot keypad when the door locks
+triggers:
+  - trigger: state
+    entity_id: lock.front_door
+    to: "locked"
+actions:
+  - action: button.press
+    target:
+      entity_id: button.switchbot_keypad_bridge_rearm_keypad
+mode: single
+```
+
+Replace the example entity IDs with yours. For a garage door, use its confirmed
+`closed` state instead. Choose the signal that means your installation is ready
+for another unlock; a door contact being closed does not necessarily mean a
+deadbolt is locked.
 
 Building on the investigation in
 [#14](https://github.com/pierluigizagaria/switchbot-keypad-bridge/issues/14),
