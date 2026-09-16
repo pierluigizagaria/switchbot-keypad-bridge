@@ -43,7 +43,7 @@ time:
 
 switchbot_keypad_bridge:
   id: keypad_bridge
-  auto_rearm_after: 20s
+  rearm_after: 20s
   keypad_action:
     name: Action
   keypad:

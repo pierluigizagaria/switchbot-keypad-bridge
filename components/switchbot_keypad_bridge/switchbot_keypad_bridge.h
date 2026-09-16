@@ -76,7 +76,7 @@ class SwitchbotKeypadBridge : public Component {
     this->pairing_ui_.set_html(html, len);
   }
   void set_battery_scan_interval(uint32_t ms) { this->battery_scan_interval_ms_ = ms; }
-  void set_auto_rearm_after(uint32_t ms) { this->keypad_state_.set_auto_rearm_after(ms); }
+  void set_rearm_after(uint32_t ms) { this->keypad_state_.set_rearm_after(ms); }
 
   // Report LOCKED on the next keypad poll, without operating a physical lock
   // or publishing a Lock event. Safe to call from local ESPHome automations.
@@ -149,7 +149,7 @@ class SwitchbotKeypadBridge : public Component {
 
   void handle_command_(const FrameHeader &header, const DecodedCommand &command);
   void handle_state_poll_(const FrameHeader &header);
-  void update_auto_rearm_();
+  void update_rearm_timer_();
   // Builds the keypad-family reply for a command. Linked-lock mode still
   // answers the keypad locally; the physical relay runs independently.
   void send_local_response_(const FrameHeader &header, const DecodedCommand &command);

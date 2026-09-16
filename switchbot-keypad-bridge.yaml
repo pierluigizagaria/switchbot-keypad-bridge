@@ -40,9 +40,9 @@ time:
 
 switchbot_keypad_bridge:
   id: keypad_bridge
-  # Optional local timer after each unlock; 0s (the default) disables it.
-  # Prefer calling rearm_keypad when your actual lock/door closes.
-  # auto_rearm_after: 20s
+  # Rearm Keypad Vision's passive face/palm unlock after each unlock.
+  # Default: 20s. Set 0s to use rearm_keypad on actual lock/door closure only.
+  rearm_after: 20s
 
   keypad_action:
     name: "Action"

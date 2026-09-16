@@ -7,8 +7,9 @@ using esphome::switchbot_keypad_bridge::KeypadState;
 using LockState = KeypadState::LockState;
 
 int main() {
-  // Existing installations remain unlocked until explicitly rearmed.
+  // Explicitly disabling the timer leaves rearm to a closure signal or action.
   KeypadState manual;
+  manual.set_rearm_after(0);
   assert(static_cast<uint8_t>(manual.lock_state()) == 0x81);
   manual.unlock(100);
   assert(static_cast<uint8_t>(manual.lock_state()) == 0x91);
@@ -19,9 +20,9 @@ int main() {
   manual.rearm();  // Safe to call repeatedly from a sensor or button.
   assert(manual.lock_state() == LockState::LOCKED);
 
-  // No early expiry; one transition at the requested delay.
+  // Default delay is 20 seconds, with no early expiry and one transition.
   KeypadState timed;
-  timed.set_auto_rearm_after(20000);
+  assert(timed.rearm_after() == 20000);
   timed.unlock(100);
   assert(!timed.update(20099));
   assert(timed.lock_state() == LockState::UNLOCKED);
@@ -53,11 +54,11 @@ int main() {
 
   // Configurable delays, including an explicit zero (disabled).
   KeypadState custom;
-  custom.set_auto_rearm_after(1234);
+  custom.set_rearm_after(1234);
   custom.unlock(0);
   assert(!custom.update(1233));
   assert(custom.update(1234));
-  custom.set_auto_rearm_after(0);
+  custom.set_rearm_after(0);
   custom.unlock(1500);
   assert(!custom.update(100000));
   assert(custom.lock_state() == LockState::UNLOCKED);

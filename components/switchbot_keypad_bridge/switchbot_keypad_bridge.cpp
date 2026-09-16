@@ -241,7 +241,7 @@ void SwitchbotKeypadBridge::loop() {
   this->apply_pending_pairing_();
   this->apply_pending_lock_link_();
   this->apply_pending_lock_relay_();
-  this->update_auto_rearm_();
+  this->update_rearm_timer_();
 
   // Idle-close the wizard only once a keypad is linked: with nothing linked
   // the wizard is the device's whole purpose ("setup mode") and must stay
@@ -426,9 +426,9 @@ void SwitchbotKeypadBridge::rearm() {
   ESP_LOGI(TAG, "Reporting locked state on the next keypad poll (rearm)");
 }
 
-void SwitchbotKeypadBridge::update_auto_rearm_() {
+void SwitchbotKeypadBridge::update_rearm_timer_() {
   if (this->keypad_state_.update(millis())) {
-    ESP_LOGI(TAG, "Auto-rearm timer expired; reporting locked state on the next keypad poll");
+    ESP_LOGI(TAG, "Face/palm rearm timer expired; reporting locked state on the next keypad poll");
   }
 }
 
@@ -436,8 +436,8 @@ void SwitchbotKeypadBridge::dump_config() {
   ESP_LOGCONFIG(TAG, "SwitchBot Keypad Bridge:");
   ESP_LOGCONFIG(TAG, "  BLE address: %s", NimBLEDevice::getAddress().toString().c_str());
   ESP_LOGCONFIG(TAG, "  Setup UI: port 80");
-  ESP_LOGCONFIG(TAG, "  Auto-rearm after: %ums (0 = disabled)",
-                static_cast<unsigned>(this->keypad_state_.auto_rearm_after()));
+  ESP_LOGCONFIG(TAG, "  Face/palm rearm after: %ums (0 = disabled)",
+                static_cast<unsigned>(this->keypad_state_.rearm_after()));
   ESP_LOGCONFIG(TAG, "  Physical lock relay: %s",
                 this->lock_linked_ ? this->linked_lock_info_.name : "Unlinked");
   if (this->keypad_battery_level_sensor_ != nullptr ||
@@ -632,7 +632,7 @@ void SwitchbotKeypadBridge::send_local_response_(const FrameHeader &header,
 }
 
 void SwitchbotKeypadBridge::handle_state_poll_(const FrameHeader &header) {
-  this->update_auto_rearm_();
+  this->update_rearm_timer_();
   uint8_t state_payload[1 + sizeof(STATE_PAYLOAD_TAIL)];
   state_payload[0] = static_cast<uint8_t>(this->keypad_state_.lock_state());
   std::memcpy(state_payload + 1, STATE_PAYLOAD_TAIL, sizeof(STATE_PAYLOAD_TAIL));
