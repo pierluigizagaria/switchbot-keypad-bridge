@@ -35,7 +35,7 @@ whether that lock is virtual, physical, or both.
 - 📲 **On-device setup wizard** — the ESP32 serves a small web page: sign in to
   your SwitchBot account, pick the keypad, optionally link the lock, done.
 - 👤 **Knows who unlocked** — every unlock carries the method (`pin` /
-  `fingerprint` / `nfc` / `face`) and the credential slot, so you can act per user.
+  `fingerprint` / `nfc` / `face` / `palm`) and the credential slot, so you can act per user.
 - 🔔 **Doorbell, no lock needed** — on Keypad Vision the doorbell button is
   enabled automatically during setup (the app normally hides it until a lock
   is bound) and each press fires its own Home Assistant event.
@@ -151,7 +151,7 @@ Every `on_unlock` trigger carries two values:
 
 | Parameter | Type | Values |
 |---|---|---|
-| `method` | `std::string` | `"pin"`, `"fingerprint"`, `"nfc"`, `"face"`, or `"unknown"` |
+| `method` | `std::string` | `"pin"`, `"fingerprint"`, `"nfc"`, `"face"`, `"palm"`, or `"unknown"` |
 | `index` | `int` | Numeric ID of the credential slot |
 
 `index` is the slot the SwitchBot app assigns when you add a credential — first

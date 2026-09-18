@@ -36,6 +36,8 @@ const char *unlock_method_name(UnlockMethod method) {
       return "nfc";
     case UnlockMethod::FACE:
       return "face";
+    case UnlockMethod::PALM:
+      return "palm";
     default:
       return "unknown";
   }
