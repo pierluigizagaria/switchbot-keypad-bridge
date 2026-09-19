@@ -232,6 +232,93 @@ switchbot_keypad_bridge:
 
 > Vision family only — Original / Touch keypads have no doorbell button.
 
+## Face and palm unlock rearming (Keypad Vision)
+
+After an unlock, Keypad Vision's passive face and palm recognition needs to see
+`LOCKED` again before it can scan again. The bridge rearms it automatically
+after **20 seconds by default**, so subsequent face/palm unlocks can work
+without pressing the keypad's Lock button. Configure this delay with
+`rearm_after`, or set `rearm_after: 0s` and call
+`switchbot_keypad_bridge.rearm` when your actual lock or garage door closes.
+
+This action reports `LOCKED` on the keypad's **next state poll**. It does not
+operate a physical lock, emit a `Lock` event, or trigger `on_lock`, even with
+physical lock relay enabled. It is not a command to start a scan immediately.
+
+### Automatic rearm delay
+
+`rearm_after` controls when passive face/palm unlock can rearm on Keypad
+Vision. The timer runs locally on the ESP32, with no dependency on HA:
+
+```yaml
+switchbot_keypad_bridge:
+  id: keypad_bridge
+  rearm_after: 20s
+```
+
+The default is `20s`, even when the option is omitted. Choose a different
+duration to customize the delay, or `0s` to disable automatic rearming.
+Every accepted unlock, regardless of method (face, palm, PIN, fingerprint,
+or NFC), restarts the countdown; its purpose is to make passive face/palm
+scanning available again. Explicit rearm or a keypad Lock command cancels it.
+The timer survives BLE disconnects, but pairing reset or linking a new keypad
+cancels it. Reboots start with the emulated lock in its usual locked state;
+pending timers are not persisted. At expiry the bridge changes the state
+reported on the next keypad poll, so scanning is not guaranteed to resume
+at exactly the configured delay.
+
+The timer does not know whether the door is open or the physical lock has
+finished moving. Set `rearm_after: 0s` when rearming must follow confirmed
+closure. Using a closure automation with the default timer does not prevent
+the timer from rearming while the door is still open.
+
+### Optional button
+
+Uncomment this example to expose a button in Home Assistant. Pressing it
+calls the same `switchbot_keypad_bridge.rearm` action:
+
+```yaml
+# Optional button to manually rearm face/palm unlock.
+# button:
+#   - platform: template
+#     name: "Rearm keypad"
+#     icon: mdi:lock-check
+#     on_press:
+#       - switchbot_keypad_bridge.rearm: keypad_bridge
+```
+
+Local ESPHome automations (including sensor or MQTT callbacks) can also call
+`switchbot_keypad_bridge.rearm` directly.
+
+To rearm only when your actual lock reports that it is locked, set
+`rearm_after: 0s`, enable the button above, and use a Home Assistant automation:
+
+```yaml
+alias: Re-arm SwitchBot keypad when the door locks
+triggers:
+  - trigger: state
+    entity_id: lock.front_door
+    to: "locked"
+actions:
+  - action: button.press
+    target:
+      entity_id: button.switchbot_keypad_bridge_rearm_keypad
+mode: single
+```
+
+Replace the example entity IDs with yours. For a garage door, use its confirmed
+`closed` state instead. Choose the signal that means your installation is ready
+for another unlock; a door contact being closed does not necessarily mean a
+deadbolt is locked.
+
+Building on the investigation in
+[#14](https://github.com/pierluigizagaria/switchbot-keypad-bridge/issues/14),
+the first pull request for locked-state synchronization was
+[#29 by Antti](https://github.com/pierluigizagaria/switchbot-keypad-bridge/pull/29),
+including documentation and an external-lock automation example, followed by
+[#30 by dr-apple](https://github.com/pierluigizagaria/switchbot-keypad-bridge/pull/30).
+Both contributions informed this shared action and configurable timer.
+
 ## 🔋 Battery sensors
 
 The keypad and linked physical lock broadcast their battery levels in BLE
@@ -259,10 +346,15 @@ switchbot_keypad_bridge:
 | `keypad_battery_level` | sensor | no | Battery percentage of the linked keypad, read from its BLE advertisement (Diagnostic category). |
 | `lock_battery_level` | sensor | no | Battery percentage of the linked physical lock, read from its BLE advertisement (Diagnostic category). |
 | `battery_scan_interval` | time | no | How often the bridge refreshes keypad and lock battery sensors with the shared advertisement scan. Default `15min`. |
+| `rearm_after` | time | no | Delay before rearming Keypad Vision's passive face/palm unlock after the latest accepted unlock. Default `20s`; `0s` disables the timer. Does not track actual door/lock state. |
 | `reset_button` | button | no | Button that forgets the linked keypad and lock, rotates the session key and re-opens the setup wizard (no reboot). |
 | `on_lock` | automation | no | Triggered on every `lock` command. |
 | `on_unlock` | automation | no | Triggered on every `unlock` command — parameters `(std::string method, int index)`. |
 | `on_doorbell` | automation | no | Triggered on every doorbell press (Keypad Vision). No parameters. |
+
+Automation action: `switchbot_keypad_bridge.rearm: <bridge_id>` (or
+`switchbot_keypad_bridge.rearm: {id: <bridge_id>}`) reports the emulated lock
+as locked and cancels pending automatic rearm. No button entity is required.
 
 ## 🔬 Under the hood
 

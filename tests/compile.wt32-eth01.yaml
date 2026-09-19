@@ -24,6 +24,16 @@ logger:
   level: VERBOSE
 
 api:
+  actions:
+    - action: rearm_keypad
+      then:
+        - switchbot_keypad_bridge.rearm: keypad_bridge
+    # Also instantiate the action in an automation with typed arguments.
+    - action: rearm_keypad_with_reason
+      variables:
+        reason: string
+      then:
+        - switchbot_keypad_bridge.rearm: keypad_bridge
 
 ota:
   - platform: esphome
@@ -32,6 +42,8 @@ time:
   - platform: sntp
 
 switchbot_keypad_bridge:
+  id: keypad_bridge
+  rearm_after: 20s
   keypad_action:
     name: Action
   keypad:
@@ -44,3 +56,11 @@ switchbot_keypad_bridge:
     name: Lock battery
   reset_button:
     name: Reset
+
+# The optional button uses the same local action as the API above.
+button:
+  - platform: template
+    name: Rearm keypad
+    on_press:
+      - switchbot_keypad_bridge.rearm:
+          id: keypad_bridge

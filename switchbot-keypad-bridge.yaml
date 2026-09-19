@@ -35,6 +35,11 @@ time:
   - platform: sntp
 
 switchbot_keypad_bridge:
+  id: keypad_bridge
+  # Rearm Keypad Vision's passive face/palm unlock after each unlock.
+  # Default: 20s. Set 0s to rearm only on confirmed lock/door closure.
+  rearm_after: 20s
+
   keypad_action:
     name: "Action"
 
@@ -68,3 +73,11 @@ switchbot_keypad_bridge:
 
   # on_doorbell:
   #   - logger.log: "Doorbell pressed"
+
+# Optional button to manually rearm face/palm unlock using the same action.
+# button:
+#   - platform: template
+#     name: "Rearm keypad"
+#     icon: mdi:lock-check
+#     on_press:
+#       - switchbot_keypad_bridge.rearm: keypad_bridge
