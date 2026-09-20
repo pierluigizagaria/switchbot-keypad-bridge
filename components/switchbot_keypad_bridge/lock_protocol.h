@@ -21,6 +21,10 @@ enum class UnlockMethod : uint8_t {
   NFC = 0x08,
   FINGERPRINT = 0x0C,
   FACE = 0x18,
+  // Palm/hand-vein recognition, confirmed by capturing the raw decrypted
+  // unlock frame on a Keypad Vision Pro (the method byte was previously
+  // unmapped and fell back to UNKNOWN/"unknown").
+  PALM = 0x20,
 };
 
 const char *unlock_method_name(UnlockMethod method);

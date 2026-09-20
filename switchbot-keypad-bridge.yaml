@@ -61,7 +61,7 @@ switchbot_keypad_bridge:
     name: "Reset"
 
   on_unlock:
-    # method: "pin" | "fingerprint" | "nfc" | "face" | "unknown"   index: credential slot
+    # method: "pin" | "fingerprint" | "nfc" | "face" | "palm" | "unknown"   index: credential slot
     - homeassistant.event:
         event: esphome.switchbot_keypad_unlock
         data:
