@@ -316,10 +316,14 @@ async def to_code(config):
     # The cloud client calls https://*.switchbot.net — pull in mbedTLS's
     # built-in certificate bundle so esp_crt_bundle_attach() finds the CAs
     # that sign those domains. Without CONFIG_MBEDTLS_CERTIFICATE_BUNDLE the
-    # TLS handshake fails with ESP_ERR_HTTP_CONNECT. Also tell ESP-IDF that
-    # this user component depends on esp_http_client and esp-tls so the
-    # headers and link symbols are visible to cloud_client.cpp.
+    # TLS handshake fails with ESP_ERR_HTTP_CONNECT. ESPHome excludes some
+    # built-in IDF components by default; re-enable the ones whose headers
+    # this component uses directly. This includes cJSON in both the cloud
+    # client and pairing UI, plus the pairing UI's HTTP server.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL", True)
     include_builtin_idf_component("esp_http_client")
     include_builtin_idf_component("esp-tls")
+    include_builtin_idf_component("json")
+    include_builtin_idf_component("esp_http_server")
+    include_builtin_idf_component("bt")
