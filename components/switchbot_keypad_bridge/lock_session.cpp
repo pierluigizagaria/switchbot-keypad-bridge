@@ -154,10 +154,14 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
 
   this->command_ = decode_lock_command(plaintext, ct_len);
 
-  // Fast Unlock on Vision periodically rotates the IV while an unlock can
-  // already be in flight under the predecessor. Admit one known UNLOCK before
-  // or immediately after a state poll promotes pending_. This allowance is
-  // bounded only by protocol events: no wall-clock timeout is involved.
+  // Fast Unlock on Vision periodically rotates the IV while an action can
+  // already be in flight under the predecessor: a credential UNLOCK, or a
+  // LOCK from the keypad's lock button (observed: Lock sent 0.7 s after an
+  // IV request, before the keypad switched). Admit one such action before or
+  // immediately after a state poll promotes pending_. LOCK only moves the
+  // door to the safe state, so it is no riskier than the late UNLOCK. This
+  // allowance is bounded only by protocol events: no wall-clock timeout is
+  // involved.
   const bool uses_predecessor =
       uses_retired || (uses_active && this->pending_.valid);
   const bool has_known_unlock_method =
@@ -165,8 +169,9 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
       this->command_.method == UnlockMethod::NFC ||
       this->command_.method == UnlockMethod::FINGERPRINT ||
       this->command_.method == UnlockMethod::FACE;
-  const bool is_fast_unlock_action =
-      this->command_.type == CommandType::UNLOCK && has_known_unlock_method;
+  const bool is_late_action =
+      (this->command_.type == CommandType::UNLOCK && has_known_unlock_method) ||
+      this->command_.type == CommandType::LOCK;
 
   // While pending_ is uncommitted, tolerate one already-in-flight poll under
   // active_. A second such poll proves the overlap has advanced without an
@@ -185,10 +190,9 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
   if (uses_predecessor && this->command_.type != CommandType::STATE_POLL) {
     // The first non-poll predecessor attempt always consumes the capability,
     // even when its command or replay status makes the frame inadmissible.
-    const bool accept_late_unlock =
-        is_fast_unlock_action && context.late_action_allowed;
+    const bool accept_late_action = is_late_action && context.late_action_allowed;
     context.late_action_allowed = false;
-    if (!accept_late_unlock) {
+    if (!accept_late_action) {
       ESP_LOGW(TAG, "Dropping non-poll frame under superseded IV");
       this->command_ = DecodedCommand{};
       if (uses_retired) {

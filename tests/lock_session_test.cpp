@@ -327,7 +327,6 @@ void test_predecessor_replay_consumes_handoff() {
 void test_rejected_predecessor_attempts_close_handoff() {
   // The first predecessor non-poll frame consumes the one-shot regardless of
   // whether it is admissible. This prevents unlimited probing without time.
-  assert_rejected_retired_attempt_closes_handoff(LOCK, 0x26);
   assert_rejected_retired_attempt_closes_handoff(UNKNOWN, 0x27);
   assert_rejected_retired_attempt_closes_handoff(DOORBELL, 0x28);
   assert_rejected_retired_attempt_closes_handoff(UNKNOWN_METHOD_UNLOCK, 0x29);
@@ -346,13 +345,164 @@ void test_rejected_active_predecessor_attempt_closes_handoff() {
 
   queue_iv(current_iv);
   assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
-  assert(session.process_frame(encrypted_frame(predecessor_iv, LOCK)) ==
+  assert(session.process_frame(encrypted_frame(predecessor_iv, DOORBELL)) ==
          LockSession::Action::NONE);
   assert(session.process_frame(
              encrypted_frame(predecessor_iv, FINGERPRINT_UNLOCK)) ==
          LockSession::Action::NONE);
   assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
          LockSession::Action::COMMAND);
+}
+
+void test_late_lock_is_admitted_once() {
+  {
+    // Ordering seen on a Keypad Vision with Fast Unlock: the lock button is
+    // pressed right after an IV request, before any frame commits pending_.
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto predecessor_iv = make_iv(0x60);
+    const auto pending_iv = make_iv(0x61);
+    queue_iv(predecessor_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(predecessor_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    queue_iv(pending_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+
+    const std::string late_lock = encrypted_frame(predecessor_iv, LOCK);
+    assert(session.process_frame(late_lock) == LockSession::Action::COMMAND);
+    assert(session.command().type == CommandType::LOCK);
+    assert_response_uses_iv(session, predecessor_iv);
+
+    // One-shot: a second late action under the predecessor is refused.
+    assert(session.process_frame(late_lock) == LockSession::Action::NONE);
+    assert(session.process_frame(
+               encrypted_frame(predecessor_iv, FINGERPRINT_UNLOCK)) ==
+           LockSession::Action::NONE);
+    assert(session.process_frame(encrypted_frame(pending_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+  }
+
+  {
+    // The other ordering: a poll commits the new IV first, then the lock
+    // encrypted with the predecessor arrives.
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto predecessor_iv = make_iv(0x62);
+    const auto current_iv = make_iv(0x63);
+    queue_iv(predecessor_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(predecessor_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    queue_iv(current_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+
+    const std::string late_lock = encrypted_frame(predecessor_iv, LOCK);
+    assert(session.process_frame(late_lock) == LockSession::Action::COMMAND);
+    assert(session.command().type == CommandType::LOCK);
+    assert_response_uses_iv(session, predecessor_iv);
+    // The predecessor is gone after its one late action.
+    assert(session.process_frame(late_lock) == LockSession::Action::NONE);
+    assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+  }
+}
+
+void test_predecessor_lock_replay_consumes_handoff() {
+  for (bool promote_pending : {false, true}) {
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto predecessor_iv = make_iv(0x64);
+    const auto current_iv = make_iv(0x65);
+    queue_iv(predecessor_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(predecessor_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+
+    const std::string accepted_lock = encrypted_frame(predecessor_iv, LOCK);
+    assert(session.process_frame(accepted_lock) == LockSession::Action::COMMAND);
+    queue_iv(current_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    if (promote_pending) {
+      assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
+             LockSession::Action::COMMAND);
+    }
+
+    // Rotating the IV must not make an already executed Lock admissible again,
+    // before or after the new generation's first poll. A rejected replay also
+    // consumes the shared allowance, so a different old Unlock cannot follow.
+    assert(session.process_frame(accepted_lock) == LockSession::Action::NONE);
+    assert(session.plaintext_size() == 0);
+    assert(session.process_frame(
+               encrypted_frame(predecessor_iv, FINGERPRINT_UNLOCK)) ==
+           LockSession::Action::NONE);
+    assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    assert_response_uses_iv(session, current_iv);
+    assert(session.process_frame(encrypted_frame(current_iv, LOCK)) ==
+           LockSession::Action::COMMAND);
+  }
+}
+
+void test_transport_reset_revokes_late_lock_handoff() {
+  for (bool promote_pending : {false, true}) {
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto predecessor_iv = make_iv(0x66);
+    const auto current_iv = make_iv(0x67);
+    queue_iv(predecessor_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(predecessor_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    queue_iv(current_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    if (promote_pending) {
+      assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
+             LockSession::Action::COMMAND);
+    }
+
+    // A reconnect revokes both forms of the predecessor allowance, even for
+    // a Lock that has never been seen. The negotiated current IV stays usable.
+    session.reset_transport();
+    assert(session.process_frame(encrypted_frame(predecessor_iv, LOCK)) ==
+           LockSession::Action::NONE);
+    assert(session.plaintext_size() == 0);
+    assert(session.process_frame(encrypted_frame(current_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    assert_response_uses_iv(session, current_iv);
+    assert(session.process_frame(encrypted_frame(current_iv, LOCK)) ==
+           LockSession::Action::COMMAND);
+  }
+}
+
+void test_late_lock_is_rejected_after_handoff_closes() {
+  for (bool promote_pending : {false, true}) {
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto predecessor_iv = make_iv(0x68);
+    const auto current_iv = make_iv(0x69);
+    queue_iv(predecessor_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(predecessor_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    queue_iv(current_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+
+    // Two predecessor polls close the pending hand-off. After promotion, one
+    // further current-generation poll discards the retained predecessor.
+    const auto &poll_iv = promote_pending ? current_iv : predecessor_iv;
+    const std::string poll = encrypted_frame(poll_iv, STATE_POLL);
+    assert(session.process_frame(poll) == LockSession::Action::COMMAND);
+    assert(session.process_frame(poll) == LockSession::Action::COMMAND);
+    assert(session.process_frame(encrypted_frame(predecessor_iv, LOCK)) ==
+           LockSession::Action::NONE);
+    assert(session.plaintext_size() == 0);
+    assert(session.process_frame(encrypted_frame(current_iv, LOCK)) ==
+           LockSession::Action::COMMAND);
+    assert_response_uses_iv(session, current_iv);
+  }
 }
 
 void test_poll_budget_closes_state_only_handoff() {
@@ -689,6 +839,10 @@ int main() {
   test_predecessor_replay_consumes_handoff();
   test_rejected_predecessor_attempts_close_handoff();
   test_rejected_active_predecessor_attempt_closes_handoff();
+  test_late_lock_is_admitted_once();
+  test_predecessor_lock_replay_consumes_handoff();
+  test_transport_reset_revokes_late_lock_handoff();
+  test_late_lock_is_rejected_after_handoff_closes();
   test_poll_budget_closes_state_only_handoff();
   test_next_encrypted_frame_closes_retired_handoff();
   test_current_generation_action_closes_retired_handoff();
