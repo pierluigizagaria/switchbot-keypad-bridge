@@ -1,5 +1,7 @@
 #pragma once
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <psa/crypto.h>
 
 #include <array>
@@ -57,8 +59,10 @@ constexpr size_t KEYPAD_NAME_MAX = 48;
 //   4. Pairing/linking FreeRTOS tasks ("kp-pair", "lock-link") — owned by
 //      their job classes, which expose progress snapshots under their own
 //      mutexes. PairingUi::poll_jobs() observes completion from loop().
-//   5. Relay FreeRTOS task ("lock-relay") — forwards one keypad payload to
-//      the physical lock and posts only the relay outcome through pending_relay_*.
+//   5. Relay FreeRTOS task ("lock-relay") — started when the keypad connects
+//      (pre-connect) or when a command arrives. Opens the lock link, takes
+//      queued keypad payloads from relay_queue_, forwards them and posts only
+//      the relay outcome through pending_relay_*.
 class SwitchbotKeypadBridge : public Component {
   SUB_TEXT_SENSOR(keypad)
   SUB_TEXT_SENSOR(linked_lock)
@@ -157,6 +161,22 @@ class SwitchbotKeypadBridge : public Component {
   // one-shot background task. The keypad is never answered from this path;
   // relay completion is logged only.
   bool relay_to_lock_async_(const FrameHeader &header, const DecodedCommand &command);
+
+  // One keypad payload for the relay worker, snapshotted on the main task.
+  struct RelayJob {
+    PhysicalLockClient::Config cfg;
+    std::vector<uint8_t> plaintext;
+    DecodedCommand command;
+    uint32_t queued_ms;
+  };
+  // Keypad connected: open the lock link now, while the keypad is still
+  // reading the credential, so the command only needs one round trip.
+  void prewarm_lock_relay_();
+  // Caller holds relay_mu_.
+  bool start_relay_worker_();
+  // Relay task body and one forwarded command.
+  void run_relay_worker_();
+  void relay_one_(const RelayJob &job);
   PhysicalLockClient::Config physical_lock_config_(uint8_t slot_id) const;
 
   // ----- Transport helpers ---------------------------------------------------
@@ -267,6 +287,15 @@ class SwitchbotKeypadBridge : public Component {
   PhysicalLockClient physical_lock_client_{};
   LinkedLockInfo linked_lock_info_{};
   bool lock_linked_{false};
+  // Relay worker handoff. relay_accepting_ (under relay_mu_) is true while
+  // the worker will still take jobs from relay_queue_; it is cleared by the
+  // worker under the same mutex before it stops receiving, so no queued job
+  // is ever stranded.
+  QueueHandle_t relay_queue_{nullptr};
+  std::mutex relay_mu_;
+  bool relay_accepting_{false};
+  // Lock config the worker pre-connects with (written before it starts).
+  PhysicalLockClient::Config relay_warm_config_{};
   // True while the relay task owns physical_lock_client_ and the central
   // role; battery scans defer to it.
   std::atomic<bool> lock_relay_busy_{false};

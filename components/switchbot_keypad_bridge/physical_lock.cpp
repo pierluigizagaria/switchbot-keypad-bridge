@@ -4,8 +4,14 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <memory>
+#include <mutex>
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <host/ble_gap.h>
+#include <host/ble_gatt.h>
+#include <host/ble_hs.h>
 
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -23,17 +29,81 @@ const char *const TAG = "switchbot_keypad_bridge.lock";
 constexpr uint8_t PROTOCOL_MAGIC = 0x57;
 constexpr size_t WIRE_HEADER_LEN = 4;
 
-struct NotifyWaiter {
+// Lock replies arrive as GATT notifications. Links driven by cached handles
+// have no discovered characteristic to subscribe through, so every reply is
+// taken from a global NimBLE GAP listener and routed to the one exchange in
+// progress. Exchanges never overlap: one relay runs at a time, and the wizard
+// refuses to link a lock while one is linked. The listener runs on the
+// NimBLE host task.
+struct ReplyRoute {
+  std::mutex mu;
+  bool active{false};
+  uint16_t conn_handle{0};
+  uint16_t attr_handle{0};
   SemaphoreHandle_t sem{nullptr};
   std::string value;
 };
+ReplyRoute g_reply_route;
+struct ble_gap_event_listener g_reply_listener;
 
-bool wait_notify(NotifyWaiter &waiter, uint32_t timeout_ms, std::string &out) {
-  if (xSemaphoreTake(waiter.sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
-    return false;
+int on_gap_event(struct ble_gap_event *event, void * /*arg*/) {
+  if (event->type != BLE_GAP_EVENT_NOTIFY_RX) {
+    return 0;
   }
-  out = waiter.value;
-  return true;
+  std::lock_guard<std::mutex> lk(g_reply_route.mu);
+  if (!g_reply_route.active ||
+      event->notify_rx.conn_handle != g_reply_route.conn_handle ||
+      event->notify_rx.attr_handle != g_reply_route.attr_handle) {
+    return 0;
+  }
+  const uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
+  g_reply_route.value.assign(len, '\0');
+  if (len > 0) {
+    os_mbuf_copydata(event->notify_rx.om, 0, len, &g_reply_route.value[0]);
+  }
+  xSemaphoreGive(g_reply_route.sem);
+  return 0;
+}
+
+// Completion of one write-with-response. Shared with the NimBLE callback so
+// a write that outlives its caller's timeout never touches freed memory.
+struct WriteResult {
+  SemaphoreHandle_t sem{nullptr};
+  int status{BLE_HS_ETIMEOUT};
+  ~WriteResult() {
+    if (this->sem != nullptr) vSemaphoreDelete(this->sem);
+  }
+};
+
+int on_write_done(uint16_t /*conn_handle*/, const struct ble_gatt_error *error,
+                  struct ble_gatt_attr * /*attr*/, void *arg) {
+  auto *ref = static_cast<std::shared_ptr<WriteResult> *>(arg);
+  (*ref)->status = error != nullptr ? error->status : 0;
+  xSemaphoreGive((*ref)->sem);
+  delete ref;
+  return 0;
+}
+
+// Write with response to a bare attribute handle. Returns 0 on success, else
+// the NimBLE/ATT status (BLE_HS_ETIMEOUT when no answer arrived in time).
+int write_handle(uint16_t conn_handle, uint16_t attr_handle, const uint8_t *data,
+                 size_t length, uint32_t timeout_ms = 3000) {
+  auto result = std::make_shared<WriteResult>();
+  result->sem = xSemaphoreCreateBinary();
+  if (result->sem == nullptr) {
+    return BLE_HS_ENOMEM;
+  }
+  auto *ref = new std::shared_ptr<WriteResult>(result);
+  const int rc = ble_gattc_write_flat(conn_handle, attr_handle, data,
+                                      static_cast<uint16_t>(length), on_write_done, ref);
+  if (rc != 0) {
+    delete ref;
+    return rc;
+  }
+  if (xSemaphoreTake(result->sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+    return BLE_HS_ETIMEOUT;
+  }
+  return result->status;
 }
 
 // Rebuild a connectable address from the bare MAC the cloud stores. The BLE
@@ -109,6 +179,65 @@ void increment_gcm_iv(std::array<uint8_t, 12> &iv) {
 }
 
 }  // namespace
+
+// RAII claim on the global reply route for one link.
+class PhysicalLockClient::ReplyChannel {
+ public:
+  ReplyChannel(uint16_t conn_handle, uint16_t attr_handle) {
+    std::lock_guard<std::mutex> lk(g_reply_route.mu);
+    if (g_reply_route.active || g_reply_route.sem == nullptr) {
+      return;
+    }
+    g_reply_route.active = true;
+    g_reply_route.conn_handle = conn_handle;
+    g_reply_route.attr_handle = attr_handle;
+    g_reply_route.value.clear();
+    xSemaphoreTake(g_reply_route.sem, 0);
+    this->owner_ = true;
+  }
+  ~ReplyChannel() {
+    if (this->owner_) {
+      std::lock_guard<std::mutex> lk(g_reply_route.mu);
+      g_reply_route.active = false;
+    }
+  }
+  ReplyChannel(const ReplyChannel &) = delete;
+  ReplyChannel &operator=(const ReplyChannel &) = delete;
+
+  bool claimed() const { return this->owner_; }
+  void retarget(uint16_t attr_handle) {
+    std::lock_guard<std::mutex> lk(g_reply_route.mu);
+    g_reply_route.attr_handle = attr_handle;
+  }
+  // Drop a reply that arrived before the next request was sent.
+  void drain() { xSemaphoreTake(g_reply_route.sem, 0); }
+  bool wait(uint32_t timeout_ms, std::string &out) {
+    if (xSemaphoreTake(g_reply_route.sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lk(g_reply_route.mu);
+    out = g_reply_route.value;
+    return true;
+  }
+
+ private:
+  bool owner_{false};
+};
+
+bool PhysicalLockClient::install_reply_listener() {
+  if (g_reply_route.sem == nullptr) {
+    g_reply_route.sem = xSemaphoreCreateBinary();
+    if (g_reply_route.sem == nullptr) {
+      return false;
+    }
+  }
+  const int rc = ble_gap_event_listener_register(&g_reply_listener, on_gap_event, nullptr);
+  if (rc != 0 && rc != BLE_HS_EALREADY) {
+    ESP_LOGE(TAG, "Could not register the lock reply listener (rc=%d)", rc);
+    return false;
+  }
+  return true;
+}
 
 const char *physical_lock_model_str(PhysicalLockModel model) {
   switch (model) {
@@ -230,6 +359,59 @@ bool PhysicalLockClient::send_plaintext(const Config &config, const uint8_t *pla
   return true;
 }
 
+PhysicalLockClient::PhysicalLockClient() = default;
+
+PhysicalLockClient::~PhysicalLockClient() { this->close(); }
+
+bool PhysicalLockClient::open(const Config &config, std::string &error_out,
+                              const ProgressCallback &progress) {
+  this->close();
+  if (!this->connect_(config, this->held_link_, error_out, progress)) {
+    return false;
+  }
+  this->held_replies_.reset(new ReplyChannel(this->held_link_.client->getConnHandle(),
+                                             this->held_link_.handles.tx));
+  if (!this->held_replies_->claimed()) {
+    error_out = "Another lock exchange is already in progress.";
+    this->close();
+    return false;
+  }
+  if (progress) progress(Phase::SESSION);
+  if (!this->open_session_with_fallback_(config, this->held_link_, *this->held_replies_,
+                                         this->held_session_, error_out)) {
+    this->close();
+    return false;
+  }
+  this->held_config_ = config;
+  this->held_open_ = true;
+  return true;
+}
+
+bool PhysicalLockClient::send(const uint8_t *plaintext, size_t plaintext_len,
+                              std::vector<uint8_t> &response_plaintext,
+                              std::string &error_out) {
+  response_plaintext.clear();
+  if (!this->held_open_) {
+    error_out = "Lock link is not open.";
+    return false;
+  }
+  if (plaintext == nullptr || plaintext_len == 0) {
+    error_out = "Empty lock command.";
+    return false;
+  }
+  const std::vector<uint8_t> command(plaintext, plaintext + plaintext_len);
+  return this->exchange_(this->held_config_, this->held_session_, this->held_link_,
+                         *this->held_replies_, command, response_plaintext, error_out);
+}
+
+void PhysicalLockClient::close() {
+  // Release the reply route before the link goes away.
+  this->held_replies_.reset();
+  this->close_(this->held_link_);
+  this->held_session_ = Session{};
+  this->held_open_ = false;
+}
+
 bool PhysicalLockClient::send_plaintext_sequence(
     const Config &config,
     const std::vector<std::vector<uint8_t>> &commands,
@@ -249,74 +431,23 @@ bool PhysicalLockClient::send_plaintext_sequence(
     }
   }
 
-  NimBLEClient *client = nullptr;
-  NimBLERemoteCharacteristic *rx = nullptr;
-  NimBLERemoteCharacteristic *tx = nullptr;
-  if (!this->connect_(config, client, rx, tx, error_out, progress)) {
+  if (!this->open(config, error_out, progress)) {
     return false;
   }
-
-  NotifyWaiter waiter;
-  waiter.sem = xSemaphoreCreateBinary();
-  if (waiter.sem == nullptr) {
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
-    error_out = "Could not allocate lock notification semaphore.";
-    return false;
-  }
-
-  if (!tx->subscribe(true,
-                     [&waiter](NimBLERemoteCharacteristic *, uint8_t *data,
-                               size_t length, bool /*is_notify*/) {
-                       waiter.value.assign(reinterpret_cast<const char *>(data), length);
-                       xSemaphoreGive(waiter.sem);
-                     })) {
-    vSemaphoreDelete(waiter.sem);
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
-    error_out = "Could not subscribe to lock notifications.";
-    return false;
-  }
-
-  bool ok = false;
-  Session session;
-  std::string notify;
-  if (progress) progress(Phase::SESSION);
-  uint8_t iv_req[8] = {PROTOCOL_MAGIC, 0x00, 0x00, 0x00, 0x0F, 0x21, 0x03, config.key_id};
-  if (!rx->writeValue(iv_req, sizeof(iv_req), /*response=*/true)) {
-    error_out = "Could not request a lock encryption session.";
-  } else if (!wait_notify(waiter, 3000, notify)) {
-    error_out = "Lock did not open an encryption session.";
-  } else if (this->parse_session_response_(notify, session, error_out)) {
-    ok = true;
-    for (const auto &cmd : commands) {
-      if (progress) progress(Phase::COMMAND);
-      if (!this->send_encrypted_(config, session, rx, cmd.data(), cmd.size(), error_out)) {
-        ok = false;
-        break;
-      }
-      if (!wait_notify(waiter, 2500, notify)) {
-        error_out = "Lock did not answer the forwarded command.";
-        ok = false;
-        break;
-      } else {
-        std::vector<uint8_t> response;
-        ok = this->decrypt_notify_(config, session, notify, response, error_out);
-        if (!ok) {
-          break;
-        }
-        if (response_callback) {
-          response_callback(response);
-        }
-        responses.push_back(std::move(response));
-      }
+  bool ok = true;
+  for (const auto &cmd : commands) {
+    if (progress) progress(Phase::COMMAND);
+    std::vector<uint8_t> response;
+    if (!this->send(cmd.data(), cmd.size(), response, error_out)) {
+      ok = false;
+      break;
     }
+    if (response_callback) {
+      response_callback(response);
+    }
+    responses.push_back(std::move(response));
   }
-
-  tx->unsubscribe();
-  vSemaphoreDelete(waiter.sem);
-  client->disconnect();
-  NimBLEDevice::deleteClient(client);
+  this->close();
   return ok;
 }
 
@@ -348,120 +479,82 @@ bool PhysicalLockClient::provision_and_verify_shared_key(
     return false;
   }
 
-  NimBLEClient *client = nullptr;
-  NimBLERemoteCharacteristic *rx = nullptr;
-  NimBLERemoteCharacteristic *tx = nullptr;
-  if (!this->connect_(provisioning_config, client, rx, tx, error_out,
-                      provision_progress)) {
+  Link link;
+  if (!this->connect_(provisioning_config, link, error_out, provision_progress)) {
     return false;
   }
 
-  NotifyWaiter waiter;
-  waiter.sem = xSemaphoreCreateBinary();
-  if (waiter.sem == nullptr) {
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
-    error_out = "Could not allocate lock notification semaphore.";
-    return false;
-  }
+  bool ok = false;
+  {
+    ReplyChannel replies(link.client->getConnHandle(), link.handles.tx);
+    if (!replies.claimed()) {
+      error_out = "Another lock exchange is already in progress.";
+    } else {
+      auto run_session =
+          [&](const Config &config, const char *session_name,
+              const std::vector<std::vector<uint8_t>> &commands,
+              std::vector<std::vector<uint8_t>> &responses,
+              const ProgressCallback &progress,
+              const CommandProgressCallback &command_progress) -> bool {
+        responses.clear();
+        Session session;
+        if (progress) progress(Phase::SESSION);
+        if (!this->open_session_with_fallback_(config, link, replies, session, error_out)) {
+          error_out = std::string(session_name) + ": " + error_out;
+          return false;
+        }
+        for (size_t i = 0; i < commands.size(); ++i) {
+          if (command_progress) {
+            command_progress(i);
+          } else if (progress) {
+            progress(Phase::COMMAND);
+          }
+          std::vector<uint8_t> response;
+          if (!this->exchange_(config, session, link, replies, commands[i], response,
+                               error_out)) {
+            return false;
+          }
+          responses.push_back(std::move(response));
+        }
+        return true;
+      };
 
-  if (!tx->subscribe(true,
-                     [&waiter](NimBLERemoteCharacteristic *, uint8_t *data,
-                               size_t length, bool /*is_notify*/) {
-                       waiter.value.assign(reinterpret_cast<const char *>(data), length);
-                       xSemaphoreGive(waiter.sem);
-                     })) {
-    vSemaphoreDelete(waiter.sem);
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
-    error_out = "Could not subscribe to lock notifications.";
-    return false;
-  }
-
-  auto run_session =
-      [&](const Config &config, const char *session_name,
-          const std::vector<std::vector<uint8_t>> &commands,
-          std::vector<std::vector<uint8_t>> &responses,
-          const ProgressCallback &progress,
-          const CommandProgressCallback &command_progress) -> bool {
-    responses.clear();
-    Session session;
-    std::string notify;
-    if (progress) progress(Phase::SESSION);
-    uint8_t iv_req[8] = {PROTOCOL_MAGIC, 0x00, 0x00, 0x00,
-                         0x0F, 0x21, 0x03, config.key_id};
-    if (!rx->writeValue(iv_req, sizeof(iv_req), /*response=*/true)) {
-      error_out = std::string("Could not request a ") + session_name +
-                  " encryption session.";
-      return false;
-    }
-    if (!wait_notify(waiter, 3000, notify)) {
-      error_out = std::string("Lock did not open the ") + session_name +
-                  " encryption session.";
-      return false;
-    }
-    if (!this->parse_session_response_(notify, session, error_out)) {
-      return false;
-    }
-
-    for (size_t i = 0; i < commands.size(); ++i) {
-      const auto &cmd = commands[i];
-      if (command_progress) {
-        command_progress(i);
-      } else if (progress) {
-        progress(Phase::COMMAND);
-      }
-      if (!this->send_encrypted_(config, session, rx, cmd.data(), cmd.size(),
-                                 error_out)) {
-        return false;
-      }
-      if (!wait_notify(waiter, 2500, notify)) {
-        error_out = "Lock did not answer the forwarded command.";
-        return false;
-      }
-      std::vector<uint8_t> response;
-      if (!this->decrypt_notify_(config, session, notify, response, error_out)) {
-        return false;
-      }
-      responses.push_back(std::move(response));
-    }
-    return true;
-  };
-
-  bool ok = run_session(provisioning_config, "lock provisioning",
-                        provision_commands, provision_responses,
-                        provision_progress, provision_command_progress);
-  if (ok) {
-    std::vector<std::vector<uint8_t>> verify_commands = {
-        std::vector<uint8_t>(verify_cmd, verify_cmd + verify_len)};
-    std::vector<std::vector<uint8_t>> verify_responses;
-    ok = run_session(shared_config, "shared-key verification",
-                     verify_commands, verify_responses,
-                     verify_progress, nullptr);
-    if (ok) {
-      if (verify_responses.empty() || verify_responses.front().empty()) {
-        error_out = "Shared key verified but no lock-info payload was returned.";
-        ok = false;
-      } else if (!lock_info_response_plausible(shared_config.model,
-                                               verify_responses.front())) {
-        error_out = "The lock answered, but the shared-key lock-info payload was not valid.";
-        ok = false;
+      ok = run_session(provisioning_config, "Lock provisioning", provision_commands,
+                       provision_responses, provision_progress,
+                       provision_command_progress);
+      if (ok) {
+        std::vector<std::vector<uint8_t>> verify_commands = {
+            std::vector<uint8_t>(verify_cmd, verify_cmd + verify_len)};
+        std::vector<std::vector<uint8_t>> verify_responses;
+        ok = run_session(shared_config, "Shared-key verification", verify_commands,
+                         verify_responses, verify_progress, nullptr);
+        if (ok) {
+          if (verify_responses.empty() || verify_responses.front().empty()) {
+            error_out = "Shared key verified but no lock-info payload was returned.";
+            ok = false;
+          } else if (!lock_info_response_plausible(shared_config.model,
+                                                   verify_responses.front())) {
+            error_out = "The lock answered, but the shared-key lock-info payload was not valid.";
+            ok = false;
+          }
+        }
       }
     }
   }
 
-  tx->unsubscribe();
-  vSemaphoreDelete(waiter.sem);
-  client->disconnect();
-  NimBLEDevice::deleteClient(client);
+  this->close_(link);
   return ok;
 }
 
-bool PhysicalLockClient::connect_(const Config &config, NimBLEClient *&client,
-                                  NimBLERemoteCharacteristic *&rx,
-                                  NimBLERemoteCharacteristic *&tx,
+bool PhysicalLockClient::connect_(const Config &config, Link &link,
                                   std::string &error_out,
                                   const ProgressCallback &progress) {
+  link = Link{};
+  // Cached handles belong to the lock they were discovered on.
+  if (this->cached_mac_ != config.mac) {
+    this->cached_handles_ = GattHandles{};
+  }
+
   // Two attempts at most: the first connects straight to the last cached
   // advertisement address — or, fresh after boot, to the address rebuilt
   // from the stored MAC — skipping the ~2.5 s discovery scan entirely. Only
@@ -482,25 +575,130 @@ bool PhysicalLockClient::connect_(const Config &config, NimBLEClient *&client,
     }
 
     if (progress) progress(Phase::CONNECT);
-    SwitchbotGattConnection conn;
-    if (!connect_switchbot_service(target, 5000, "physical lock", conn, error_out)) {
+    link.client = connect_switchbot_link(target, 5000, "physical lock", error_out);
+    if (link.client == nullptr) {
       if (attempt == 0) {
         this->cached_mac_.clear();  // direct connect failed — scan for real
         continue;
       }
       return false;
     }
-
-    if (progress) progress(Phase::DISCOVER);
-    client = conn.client;
-    rx = conn.rx;
-    tx = conn.tx;
     this->cached_addr_ = target;
     this->cached_mac_  = config.mac;
+
+    if (this->cached_handles_.valid()) {
+      link.handles = this->cached_handles_;
+      link.from_cache = true;
+      ESP_LOGD(TAG, "Using cached lock handles (rx=0x%04X tx=0x%04X cccd=0x%04X)",
+               link.handles.rx, link.handles.tx, link.handles.cccd);
+    } else if (!this->discover_handles_(link, error_out)) {
+      this->close_(link);
+      return false;
+    }
+    if (progress) progress(Phase::DISCOVER);
     return true;
   }
   error_out = "Could not connect to the physical lock.";
   return false;
+}
+
+bool PhysicalLockClient::discover_handles_(Link &link, std::string &error_out) {
+  SwitchbotGattConnection conn;
+  if (!discover_switchbot_service(link.client, "physical lock", conn, error_out)) {
+    return false;
+  }
+  NimBLERemoteDescriptor *cccd =
+      conn.tx->getDescriptor(NimBLEUUID(static_cast<uint16_t>(0x2902)));
+  if (cccd == nullptr) {
+    error_out = "The lock's reply characteristic cannot send notifications.";
+    return false;
+  }
+  link.handles.rx = conn.rx->getHandle();
+  link.handles.tx = conn.tx->getHandle();
+  link.handles.cccd = cccd->getHandle();
+  link.from_cache = false;
+  this->cached_handles_ = link.handles;
+  ESP_LOGD(TAG, "Discovered lock handles (rx=0x%04X tx=0x%04X cccd=0x%04X)",
+           link.handles.rx, link.handles.tx, link.handles.cccd);
+  return true;
+}
+
+bool PhysicalLockClient::open_session_(const Config &config, const Link &link,
+                                       ReplyChannel &replies, Session &session,
+                                       std::string &error_out) {
+  const uint16_t conn_handle = link.client->getConnHandle();
+  static constexpr uint8_t ENABLE_NOTIFY[2] = {0x01, 0x00};
+  int rc = write_handle(conn_handle, link.handles.cccd, ENABLE_NOTIFY, sizeof(ENABLE_NOTIFY));
+  if (rc != 0) {
+    error_out = "Could not enable lock notifications (rc=" + std::to_string(rc) + ").";
+    return false;
+  }
+
+  replies.drain();
+  const uint8_t iv_req[8] = {PROTOCOL_MAGIC, 0x00, 0x00, 0x00,
+                             0x0F, 0x21, 0x03, config.key_id};
+  rc = write_handle(conn_handle, link.handles.rx, iv_req, sizeof(iv_req));
+  if (rc != 0) {
+    error_out = "Could not request a lock encryption session (rc=" +
+                std::to_string(rc) + ").";
+    return false;
+  }
+
+  // The lock answers in ~0.1 s. On cached handles, give up sooner so a stale
+  // cache falls back to discovery without a long stall.
+  std::string notify;
+  if (!replies.wait(link.from_cache ? 1500 : 3000, notify)) {
+    error_out = "Lock did not open an encryption session.";
+    return false;
+  }
+  return this->parse_session_response_(notify, session, error_out);
+}
+
+bool PhysicalLockClient::open_session_with_fallback_(const Config &config, Link &link,
+                                                     ReplyChannel &replies,
+                                                     Session &session,
+                                                     std::string &error_out) {
+  if (this->open_session_(config, link, replies, session, error_out)) {
+    return true;
+  }
+  if (!link.from_cache || !link.client->isConnected()) {
+    return false;
+  }
+  ESP_LOGW(TAG, "Cached lock handles failed (%s); rediscovering", error_out.c_str());
+  this->cached_handles_ = GattHandles{};
+  if (!this->discover_handles_(link, error_out)) {
+    return false;
+  }
+  replies.retarget(link.handles.tx);
+  return this->open_session_(config, link, replies, session, error_out);
+}
+
+bool PhysicalLockClient::exchange_(const Config &config, const Session &session,
+                                   const Link &link, ReplyChannel &replies,
+                                   const std::vector<uint8_t> &command,
+                                   std::vector<uint8_t> &response,
+                                   std::string &error_out) {
+  replies.drain();
+  if (!this->send_encrypted_(config, session, link, command.data(), command.size(),
+                             error_out)) {
+    return false;
+  }
+  std::string notify;
+  if (!replies.wait(2500, notify)) {
+    error_out = "Lock did not answer the forwarded command.";
+    return false;
+  }
+  return this->decrypt_notify_(config, session, notify, response, error_out);
+}
+
+void PhysicalLockClient::close_(Link &link) {
+  // No CCCD unsubscribe: the link is not bonded, so the lock forgets the
+  // notification switch on disconnect anyway — skipping it saves a round trip.
+  if (link.client != nullptr) {
+    link.client->disconnect();
+    NimBLEDevice::deleteClient(link.client);
+  }
+  link = Link{};
 }
 
 bool PhysicalLockClient::parse_session_response_(const std::string &wire,
@@ -533,7 +731,7 @@ bool PhysicalLockClient::parse_session_response_(const std::string &wire,
 }
 
 bool PhysicalLockClient::send_encrypted_(const Config &config, const Session &session,
-                                         NimBLERemoteCharacteristic *rx,
+                                         const Link &link,
                                          const uint8_t *plaintext,
                                          size_t plaintext_len,
                                          std::string &error_out) {
@@ -564,8 +762,11 @@ bool PhysicalLockClient::send_encrypted_(const Config &config, const Session &se
 
   ESP_LOGV(TAG, "TX lock %s",
            format_hex_pretty(frame.data(), frame.size()).c_str());
-  if (!rx->writeValue(frame.data(), frame.size(), /*response=*/true)) {
-    error_out = "Could not write encrypted command to the lock.";
+  const int rc = write_handle(link.client->getConnHandle(), link.handles.rx,
+                              frame.data(), frame.size());
+  if (rc != 0) {
+    error_out = "Could not write encrypted command to the lock (rc=" +
+                std::to_string(rc) + ").";
     return false;
   }
   return true;

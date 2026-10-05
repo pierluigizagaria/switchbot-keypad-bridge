@@ -48,6 +48,11 @@ constexpr size_t AES_KEY_SIZE = 16;
 constexpr uint32_t BATTERY_SCAN_DURATION_MS = 5000;
 constexpr uint32_t BATTERY_SCAN_RETRY_MS    = 30000;
 
+// How long a pre-connected lock link waits for the keypad's command before
+// the relay worker closes it. The keypad sends its command well under a
+// second after connecting; this also covers slower PIN entry.
+constexpr uint32_t RELAY_HOLD_MS = 5000;
+
 bool is_shared_slot(uint8_t slot) {
   return slot == SHARED_SLOT_ORIGINAL || slot == SHARED_SLOT_VISION;
 }
@@ -263,6 +268,7 @@ void SwitchbotKeypadBridge::loop() {
     if (ev.type == QueuedEvent::CONNECT) {
       ESP_LOGI(TAG, "Keypad connected");
       this->session_.reset_transport();
+      this->prewarm_lock_relay_();
     } else if (ev.type == QueuedEvent::DISCONNECT) {
       ESP_LOGI(TAG, "Keypad disconnected, restarting advertising");
       this->session_.reset_transport();
@@ -512,6 +518,10 @@ bool SwitchbotKeypadBridge::prepare_ble_() {
 
   NimBLEDevice::init("WoLock");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  if (!PhysicalLockClient::install_reply_listener()) {
+    ESP_LOGE(TAG, "Lock reply listener unavailable");
+    return false;
+  }
 
   this->server_ = NimBLEDevice::createServer();
   this->server_->setCallbacks(new ServerCallbacks(this));
@@ -662,72 +672,163 @@ bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
     ESP_LOGW(TAG, "Cannot relay command: no decrypted keypad plaintext");
     return false;
   }
-  if (this->lock_relay_busy_.exchange(true)) {
-    ESP_LOGW(TAG, "Lock relay still in flight — answering this command locally");
+  // Snapshot everything the worker needs now: the session buffer is reused by
+  // the next keypad frame, and the config must not be read off-thread.
+  auto *job = new RelayJob{
+      this->physical_lock_config_(header.key_id),
+      {this->session_.plaintext(),
+       this->session_.plaintext() + this->session_.plaintext_size()},
+      command, millis()};
+
+  std::lock_guard<std::mutex> lk(this->relay_mu_);
+  if (!this->relay_accepting_) {
+    if (this->lock_relay_busy_.load()) {
+      delete job;
+      ESP_LOGW(TAG, "Lock relay still closing — answering this command locally");
+      return false;
+    }
+    if (!this->start_relay_worker_()) {
+      delete job;
+      return false;
+    }
+  }
+  if (xQueueSend(this->relay_queue_, &job, 0) != pdTRUE) {
+    delete job;
+    ESP_LOGW(TAG, "Lock relay queue full — answering this command locally");
     return false;
+  }
+  return true;
+}
+
+void SwitchbotKeypadBridge::prewarm_lock_relay_() {
+  if (!this->lock_linked_ || this->linked_lock_info_.valid == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> lk(this->relay_mu_);
+  if (this->lock_relay_busy_.load()) {
+    return;  // a worker already owns the lock link
+  }
+  this->start_relay_worker_();
+}
+
+bool SwitchbotKeypadBridge::start_relay_worker_() {
+  if (this->relay_queue_ == nullptr) {
+    this->relay_queue_ = xQueueCreate(2, sizeof(RelayJob *));
+    if (this->relay_queue_ == nullptr) {
+      ESP_LOGW(TAG, "Could not create the lock relay queue");
+      return false;
+    }
   }
   // The relay opens a central connection; make sure the battery advert scan
   // isn't holding the radio.
   this->stop_battery_scan_();
+  this->relay_warm_config_ = this->physical_lock_config_(this->linked_lock_info_.slot_id);
+  this->lock_relay_busy_.store(true);
+  this->relay_accepting_ = true;
 
-  // Snapshot everything the task needs now: the session buffer is reused by
-  // the next keypad frame, and the config must not be read off-thread.
-  struct RelayCtx {
-    SwitchbotKeypadBridge *self;
-    PhysicalLockClient::Config cfg;
-    std::vector<uint8_t> plaintext;
-    DecodedCommand command;
-  };
-  auto *ctx = new RelayCtx{
-      this, this->physical_lock_config_(header.key_id),
-      {this->session_.plaintext(),
-       this->session_.plaintext() + this->session_.plaintext_size()},
-      command};
-
-  BaseType_t rc = xTaskCreatePinnedToCore(
+  const BaseType_t rc = xTaskCreatePinnedToCore(
       [](void *raw) {
-        auto *c = static_cast<RelayCtx *>(raw);
-        std::vector<uint8_t> response;
-        std::string error;
-        bool result_posted = false;
-        auto post_relay_result = [c, &result_posted](bool ok) {
-          c->self->relay_command_  = c->command;
-          c->self->relay_ok_       = ok;
-          c->self->pending_relay_apply_.store(true, std::memory_order_release);
-          result_posted = true;
-        };
-        const bool ok = c->self->physical_lock_client_.send_plaintext(
-            c->cfg, c->plaintext.data(), c->plaintext.size(), response, error,
-            nullptr,
-            [&post_relay_result](const std::vector<uint8_t> &reply) {
-              // The keypad already got its local response. This callback only
-              // lets loop() log that the physical lock replied.
-              (void) reply;
-              post_relay_result(true);
-            });
-        if (!ok) {
-          ESP_LOGW(TAG, "Lock relay command failed: %s", error.c_str());
-        }
-        // If the lock never produced a response, hand the final outcome to
-        // loop() after send_plaintext() returns. Successful replies are noted
-        // immediately by the callback above.
-        if (!result_posted) {
-          post_relay_result(ok);
-        }
-        c->self->lock_relay_busy_.store(false);
-        delete c;
+        static_cast<SwitchbotKeypadBridge *>(raw)->run_relay_worker_();
         vTaskDelete(nullptr);
       },
-      "lock-relay", 8192, ctx, tskIDLE_PRIORITY + 2, nullptr,
+      "lock-relay", 8192, this, tskIDLE_PRIORITY + 2, nullptr,
       // Same core as the BT task, matching the pairer/linker jobs.
       0);
   if (rc != pdPASS) {
-    delete ctx;
+    this->relay_accepting_ = false;
     this->lock_relay_busy_.store(false);
     ESP_LOGW(TAG, "Could not start the lock relay task");
     return false;
   }
   return true;
+}
+
+void SwitchbotKeypadBridge::run_relay_worker_() {
+  PhysicalLockClient &client = this->physical_lock_client_;
+  const uint32_t started = millis();
+  std::string error;
+  // Open the link and the encryption session up front. Started on keypad
+  // connect, this overlaps the lock's connection time with the keypad
+  // reading the credential.
+  if (client.open(this->relay_warm_config_, error)) {
+    ESP_LOGD(TAG, "Relay timing: lock link ready %ums after start",
+             static_cast<unsigned>(millis() - started));
+  } else {
+    ESP_LOGW(TAG, "Lock pre-connect failed: %s", error.c_str());
+  }
+
+  // One command per keypad wake-up is the norm: stop after the first job
+  // unless another is already queued, or after RELAY_HOLD_MS without one.
+  bool handled = false;
+  for (;;) {
+    RelayJob *job = nullptr;
+    const TickType_t wait = handled ? 0 : pdMS_TO_TICKS(RELAY_HOLD_MS);
+    if (xQueueReceive(this->relay_queue_, &job, wait) != pdTRUE) {
+      std::lock_guard<std::mutex> lk(this->relay_mu_);
+      if (uxQueueMessagesWaiting(this->relay_queue_) > 0) {
+        continue;
+      }
+      this->relay_accepting_ = false;
+      break;
+    }
+    this->relay_one_(*job);
+    delete job;
+    handled = true;
+  }
+
+  client.close();
+  if (!handled) {
+    ESP_LOGD(TAG, "No keypad command within %ums; closed the lock link",
+             static_cast<unsigned>(RELAY_HOLD_MS));
+  }
+  this->lock_relay_busy_.store(false);
+}
+
+void SwitchbotKeypadBridge::relay_one_(const RelayJob &job) {
+  PhysicalLockClient &client = this->physical_lock_client_;
+  // Relay latency breakdown: each line is the time since the keypad frame
+  // was queued.
+  const uint32_t queued = job.queued_ms;
+  auto log_phase = [queued](PhysicalLockClient::Phase phase) {
+    const char *name = "?";
+    switch (phase) {
+      case PhysicalLockClient::Phase::SCAN:     name = "scan"; break;
+      case PhysicalLockClient::Phase::CONNECT:  name = "connect"; break;
+      case PhysicalLockClient::Phase::DISCOVER: name = "connected"; break;
+      case PhysicalLockClient::Phase::SESSION:  name = "session request"; break;
+      case PhysicalLockClient::Phase::COMMAND:  name = "command sent"; break;
+    }
+    ESP_LOGD(TAG, "Relay timing: %s +%ums", name,
+             static_cast<unsigned>(millis() - queued));
+  };
+
+  std::vector<uint8_t> response;
+  std::string error;
+  bool ok = false;
+  if (client.is_open() && client.open_key_id() == job.cfg.key_id) {
+    ESP_LOGD(TAG, "Relay timing: sending on pre-connected link +%ums",
+             static_cast<unsigned>(millis() - queued));
+    ok = client.send(job.plaintext.data(), job.plaintext.size(), response, error);
+    if (!ok) {
+      ESP_LOGW(TAG, "Pre-connected lock link failed (%s); reconnecting", error.c_str());
+    }
+  }
+  if (!ok) {
+    ok = client.open(job.cfg, error, log_phase) &&
+         client.send(job.plaintext.data(), job.plaintext.size(), response, error);
+  }
+  if (ok) {
+    ESP_LOGD(TAG, "Relay timing: lock replied +%ums",
+             static_cast<unsigned>(millis() - queued));
+  } else {
+    ESP_LOGW(TAG, "Lock relay command failed: %s", error.c_str());
+  }
+  client.close();
+
+  // The keypad already got its local response; loop() only logs this.
+  this->relay_command_ = job.command;
+  this->relay_ok_ = ok;
+  this->pending_relay_apply_.store(true, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
