@@ -43,6 +43,17 @@ const char *unlock_method_name(UnlockMethod method) {
   }
 }
 
+int unlock_method_index(UnlockMethod method) {
+  switch (method) {
+    case UnlockMethod::PIN: return 0;
+    case UnlockMethod::NFC: return 1;
+    case UnlockMethod::FINGERPRINT: return 2;
+    case UnlockMethod::FACE: return 3;
+    case UnlockMethod::PALM: return 4;
+    default: return -1;
+  }
+}
+
 DecodedCommand decode_lock_command(const uint8_t *plaintext, size_t length) {
   DecodedCommand out;
 
@@ -62,9 +73,14 @@ DecodedCommand decode_lock_command(const uint8_t *plaintext, size_t length) {
   }
   if (length >= 8 && std::memcmp(plaintext, FRAME_ACTION, sizeof(FRAME_ACTION)) == 0 &&
       plaintext[UNLOCK_MARKER_OFFSET] == UNLOCK_MARKER) {
+    const auto method = static_cast<UnlockMethod>(plaintext[UNLOCK_METHOD_OFFSET]);
+    if (unlock_method_index(method) < 0) {
+      return out;
+    }
     out.type = CommandType::UNLOCK;
-    out.method = static_cast<UnlockMethod>(plaintext[UNLOCK_METHOD_OFFSET]);
+    out.method = method;
     const uint8_t idx_byte = plaintext[UNLOCK_INDEX_OFFSET];
+    out.credential_wire_index = idx_byte;
     // Original keypad: index encoded as 0x0A + zero-based slot. Vision: raw
     // zero-based byte (we only have a single capture with 0x00, so this is
     // a best-effort decode). Heuristic: if the byte ≥ 0x0A, treat as the

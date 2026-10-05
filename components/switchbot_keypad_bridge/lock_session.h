@@ -2,8 +2,10 @@
 
 // Encrypted-session state machine for the emulated SwitchBot Lock: token-slot
 // learning, IV negotiation, frame validation, AES-CTR transport crypto and
-// anti-replay. Bytes in, decoded commands out — no NimBLE and no ESPHome
-// entities, so the entire validation pipeline lives in one reviewable place.
+// action deduplication. CTR does not authenticate messages; this layer cannot
+// prevent a forged, previously unseen action. Bytes in, decoded commands out —
+// no NimBLE and no ESPHome entities, so the entire validation pipeline lives
+// in one reviewable place.
 // The bridge owns the transport (BLE notify) and the business logic (lock
 // state, entity publishing) on top of it.
 
@@ -50,7 +52,7 @@ class LockSession {
   void reset();
 
   // Clear transient decoded-frame state while preserving active/pending IVs
-  // and their replay windows. A transport boundary does revoke the one-shot
+  // and their action histories. A transport boundary does revoke the one-shot
   // Fast Unlock overlap, which is valid only within one BLE connection.
   void reset_transport();
 
@@ -81,7 +83,8 @@ class LockSession {
 
  private:
   static constexpr size_t AES_IV_SIZE = 16;
-  static constexpr size_t REPLAY_HISTORY_SIZE = 8;
+  static constexpr size_t CREDENTIAL_INDEX_COUNT = 256;
+  static constexpr size_t UNLOCK_HISTORY_BYTES = CREDENTIAL_INDEX_COUNT / 8;
 
   bool is_iv_request_(const std::string &frame) const;
   void ensure_pending_iv_();
@@ -99,29 +102,26 @@ class LockSession {
   // no encrypted frame is accepted until an IV handshake has set it.
   uint8_t slot_id_{0x00};
 
-  struct ReplayEntry {
-    std::array<uint8_t, MAX_PAYLOAD> data{};
-    size_t length{0};
-  };
-
-  // An IV and its replay window form one logical crypto generation. A new IV
+  // An IV and its action history form one logical crypto generation. A new IV
   // remains pending until the keypad proves it switched by sending a frame
   // whose seq bytes match it. Keeping the previous generation alive during
   // that hand-off lets us answer an already-in-flight state poll without
   // reopening old lock/unlock actions.
   struct CryptoContext {
     std::array<uint8_t, AES_IV_SIZE> iv{};
-    std::array<ReplayEntry, REPLAY_HISTORY_SIZE> replay_history{};
-    size_t replay_head{0};
+    // One bit per supported method + wire credential index, plus LOCK.
+    // Retain every accepted action until this IV is discarded: there is no
+    // eviction or heap growth, and ignored payload bytes cannot create a new
+    // identity for the same method and credential.
+    std::array<std::array<uint8_t, UNLOCK_HISTORY_BYTES>, UNLOCK_METHOD_COUNT> unlock_history{};
+    bool lock_seen{false};
     bool late_action_allowed{false};
     bool handoff_poll_seen{false};
     bool valid{false};
   };
 
-  bool is_replayed_ciphertext_(const CryptoContext &context,
-                               const uint8_t *ciphertext, size_t length) const;
-  void record_ciphertext_(CryptoContext &context, const uint8_t *ciphertext,
-                          size_t length);
+  bool is_replayed_action_(const CryptoContext &context, const DecodedCommand &command) const;
+  void record_action_(CryptoContext &context, const DecodedCommand &command);
   bool seq_matches_(const CryptoContext &context, const FrameHeader &header) const;
 
   CryptoContext active_{};

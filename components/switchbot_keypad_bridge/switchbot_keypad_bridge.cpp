@@ -591,7 +591,6 @@ void SwitchbotKeypadBridge::handle_command_(const FrameHeader &header, const Dec
     switch (command.type) {
       case CommandType::LOCK:
       case CommandType::UNLOCK:
-      case CommandType::UNKNOWN:
         if (!this->relay_to_lock_async_(header, command)) {
           ESP_LOGW(TAG, "Physical lock relay unavailable after local keypad response");
         }
@@ -658,6 +657,10 @@ PhysicalLockClient::Config SwitchbotKeypadBridge::physical_lock_config_(uint8_t 
 
 bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
                                                  const DecodedCommand &command) {
+  if (command.type != CommandType::LOCK && command.type != CommandType::UNLOCK) {
+    ESP_LOGW(TAG, "Cannot relay unsupported keypad command");
+    return false;
+  }
   if (this->session_.plaintext_size() == 0) {
     ESP_LOGW(TAG, "Cannot relay command: no decrypted keypad plaintext");
     return false;

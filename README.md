@@ -28,7 +28,8 @@ whether that lock is virtual, physical, or both.
 - 🔓 **No SwitchBot Lock required** — repurpose a keypad as a standalone, fully
   local door/access controller.
 - 🔒 **Optional physical lock relay** — link a real SwitchBot Lock in the same
-  wizard and the bridge forwards keypad protocol messages over encrypted BLE.
+  wizard and the bridge forwards supported lock/unlock commands using the
+  shared protocol key.
 - 📟 **Every SwitchBot keypad works** — Keypad, Keypad Touch, Keypad Vision and
   Vision Pro: that's the whole lineup. Touch and Vision are tested on real
   hardware; the other two speak the exact same protocols.
@@ -379,6 +380,39 @@ as locked and cancels pending automatic rearm. No button entity is required.
 - **Key hygiene** — reset rotates the shared keypad/lock session key and clears
   the linked lock record, so a previously linked keypad can no longer command
   the bridge.
+
+## Security limits
+
+The keypad protocol uses AES-CTR without a message authentication tag. CTR
+encryption does not prove who sent a command or detect deliberate changes to
+its ciphertext. The bridge does not currently require authenticated BLE
+pairing. An attacker able to capture and submit frames under a still-valid IV
+can forge a previously unseen command; action deduplication cannot prevent
+that. Requiring authenticated BLE would need compatibility testing with the
+keypad, and adding a tag only on the bridge would not change the keypad's
+protocol. Treat these limits as part of the threat model when using the bridge
+to control physical access.
+
+The bridge accepts only supported commands and unlock methods (PIN, NFC,
+fingerprint, face and palm). Unsupported frames are dropped and never relayed
+to a physical lock. For each IV, it remembers LOCK and every accepted
+method/credential-byte pair until that IV is discarded, including across
+ordinary BLE reconnects. The history has fixed memory use and never evicts an
+earlier action. Changing ignored trailing bytes or the payload length cannot
+make a repeated decoded action execute again.
+
+Consequently, a second legitimate identical action in the same IV is also
+dropped: the protocol provides no authenticated per-command counter to tell
+it apart from a replay. Adopting a new IV permits the action again. State polls
+and doorbell presses may repeat. Vision's one-action predecessor hand-off
+remains bounded by protocol events and is revoked at a transport boundary.
+
+Host-side regression tests cover the action history, altered payloads,
+unsupported commands and IV hand-off boundaries:
+
+```sh
+sh tests/run_lock_session_tests.sh
+```
 
 ## ❓ FAQ
 

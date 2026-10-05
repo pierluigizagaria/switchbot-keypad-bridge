@@ -25,6 +25,8 @@ constexpr std::array<uint8_t, 8> UNLOCK = {0x0F, 0x4E, 0x01, 0x03,
                                            0x04, 0x80, 0x00, 0x00};
 constexpr std::array<uint8_t, 8> FINGERPRINT_UNLOCK = {
     0x0F, 0x4E, 0x01, 0x03, 0x0C, 0x80, 0x00, 0x00};
+constexpr std::array<uint8_t, 8> PALM_UNLOCK = {
+    0x0F, 0x4E, 0x01, 0x03, 0x20, 0x80, 0x00, 0x00};
 constexpr std::array<uint8_t, 8> UNKNOWN_METHOD_UNLOCK = {
     0x0F, 0x4E, 0x01, 0x03, 0x7C, 0x80, 0x00, 0x00};
 constexpr std::array<uint8_t, 2> DOORBELL = {0x01, 0x03};
@@ -809,6 +811,195 @@ void test_iv_request_requires_complete_fixed_header() {
   assert(response_iv(session) == iv);
 }
 
+void assert_dropped_without_response(LockSession &session, const std::string &frame) {
+  assert(session.process_frame(frame) == LockSession::Action::NONE);
+  assert(session.plaintext_size() == 0);
+  assert(session.command().type == CommandType::UNKNOWN);
+  const uint8_t reply[] = {0x81, 0x08, 0x08};
+  uint8_t packet[LockSession::MAX_PACKET]{};
+  assert(session.encrypt_response(session.header(), reply, sizeof(reply), packet) == 0);
+}
+
+void test_action_history_never_evicts() {
+  for (const uint8_t slot : {SLOT_VISION, SLOT_TOUCH}) {
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto iv = make_iv(0x36);
+    queue_iv(iv);
+    assert(session.process_frame(iv_request(slot)) == LockSession::Action::SEND_IV);
+    const auto first_lock = encrypted_frame(iv, LOCK, slot);
+    assert(session.process_frame(first_lock) == LockSession::Action::COMMAND);
+
+    const UnlockMethod methods[] = {UnlockMethod::PIN, UnlockMethod::NFC,
+                                   UnlockMethod::FINGERPRINT, UnlockMethod::FACE,
+                                   UnlockMethod::PALM};
+    static_assert(sizeof(methods) / sizeof(methods[0]) ==
+                  esphome::switchbot_keypad_bridge::UNLOCK_METHOD_COUNT);
+    // Exhaust every supported method and all 256 credential-byte values,
+    // well beyond the old eight-entry cache.
+    for (const auto method : methods) {
+      for (size_t wire_index = 0; wire_index <= 0xFF; ++wire_index) {
+        auto command = UNLOCK;
+        command[4] = static_cast<uint8_t>(method);
+        command[6] = static_cast<uint8_t>(wire_index);
+        const auto frame = encrypted_frame(iv, command, slot);
+        assert(session.process_frame(frame) == LockSession::Action::COMMAND);
+        assert(session.command().method == method);
+        assert(session.command().credential_wire_index == wire_index);
+        assert(session.command().credential_index ==
+               static_cast<int16_t>(wire_index >= 0x0A ? wire_index - 0x0A : wire_index));
+        assert_dropped_without_response(session, frame);
+      }
+    }
+    assert_dropped_without_response(session, first_lock);
+    assert_dropped_without_response(session, encrypted_frame(iv, UNLOCK, slot));
+    session.reset_transport();
+    assert_dropped_without_response(session, first_lock);
+    assert_dropped_without_response(session, encrypted_frame(iv, UNLOCK, slot));
+
+    // History is scoped to the IV; the same legitimate action can be used
+    // again after a new generation has been adopted.
+    const auto next_iv = make_iv(0x56);
+    queue_iv(next_iv);
+    assert(session.process_frame(iv_request(slot)) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(next_iv, LOCK, slot)) ==
+           LockSession::Action::COMMAND);
+    assert(session.process_frame(encrypted_frame(next_iv, UNLOCK, slot)) ==
+           LockSession::Action::COMMAND);
+  }
+}
+
+void test_unlock_padding_and_length_do_not_bypass_history() {
+  LockSession session;
+  session.set_aes_key(TEST_KEY);
+  const auto iv = make_iv(0x3A);
+  queue_iv(iv);
+  assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+  const auto original = encrypted_frame(iv, UNLOCK);
+  assert(session.process_frame(original) == LockSession::Action::COMMAND);
+  for (size_t byte = 0; byte <= 0xFF; ++byte) {
+    std::string modified = original;
+    modified[LockSession::HEADER_LEN + 7] = static_cast<char>(
+        static_cast<uint8_t>(modified[LockSession::HEADER_LEN + 7]) ^ byte);
+    assert_dropped_without_response(session, modified);
+  }
+  // Longer frames still decode to the same action, not a new replay identity.
+  for (size_t length = original.size() + 1;
+       length <= LockSession::MAX_PACKET; ++length) {
+    std::string modified = original;
+    modified.resize(length, static_cast<char>(0xA5));
+    assert_dropped_without_response(session, modified);
+  }
+  auto aliased_index = UNLOCK;
+  aliased_index[6] = 0x0A;
+  // The existing display heuristic maps 0x00 and 0x0A alike. Keep the
+  // original byte for history so legitimate distinct credentials do not
+  // suppress one another; changing credential IDs is an unauthenticated
+  // new action, which this protocol cannot protect against.
+  assert(session.process_frame(encrypted_frame(iv, aliased_index)) ==
+         LockSession::Action::COMMAND);
+  assert_dropped_without_response(session, encrypted_frame(iv, aliased_index));
+}
+
+void test_modified_predecessor_replay_consumes_handoff() {
+  for (const bool promote_pending : {false, true}) {
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto previous_iv = make_iv(0x3B);
+    const auto next_iv = make_iv(0x5B);
+    queue_iv(previous_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    auto observed = encrypted_frame(previous_iv, UNLOCK);
+    assert(session.process_frame(observed) == LockSession::Action::COMMAND);
+    queue_iv(next_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    if (promote_pending) {
+      assert(session.process_frame(encrypted_frame(next_iv, STATE_POLL)) ==
+             LockSession::Action::COMMAND);
+    }
+    observed[LockSession::HEADER_LEN + 7] ^= 0x01;
+    assert_dropped_without_response(session, observed);
+    assert_dropped_without_response(session, encrypted_frame(previous_iv, LOCK));
+    assert(session.process_frame(encrypted_frame(next_iv, UNLOCK)) ==
+           LockSession::Action::COMMAND);
+  }
+}
+
+void test_unknown_commands_and_methods_are_dropped() {
+  LockSession session;
+  session.set_aes_key(TEST_KEY);
+  const auto iv = make_iv(0x3C);
+  queue_iv(iv);
+  assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+  // Unsupported frames cannot promote pending_ or reach the relay.
+  assert_dropped_without_response(session, encrypted_frame(iv, UNKNOWN));
+  for (size_t method = 0; method <= 0xFF; ++method) {
+    if (esphome::switchbot_keypad_bridge::unlock_method_index(
+            static_cast<UnlockMethod>(method)) >= 0) {
+      continue;
+    }
+    auto command = UNLOCK;
+    command[4] = static_cast<uint8_t>(method);
+    assert_dropped_without_response(session, encrypted_frame(iv, command));
+  }
+  assert(session.process_frame(encrypted_frame(iv, UNLOCK)) ==
+         LockSession::Action::COMMAND);
+  assert_dropped_without_response(session, encrypted_frame(iv, UNKNOWN));
+  assert_dropped_without_response(session, encrypted_frame(iv, UNKNOWN_METHOD_UNLOCK));
+}
+
+void test_palm_unlock_uses_one_shot_handoff() {
+  for (const bool promote_pending : {false, true}) {
+    LockSession session;
+    session.set_aes_key(TEST_KEY);
+    const auto previous_iv = make_iv(0x3D);
+    const auto next_iv = make_iv(0x5D);
+    queue_iv(previous_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    assert(session.process_frame(encrypted_frame(previous_iv, STATE_POLL)) ==
+           LockSession::Action::COMMAND);
+    queue_iv(next_iv);
+    assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+    if (promote_pending) {
+      assert(session.process_frame(encrypted_frame(next_iv, STATE_POLL)) ==
+             LockSession::Action::COMMAND);
+    }
+    assert(session.process_frame(encrypted_frame(previous_iv, PALM_UNLOCK)) ==
+           LockSession::Action::COMMAND);
+    assert(session.command().method == UnlockMethod::PALM);
+    assert_response_uses_iv(session, previous_iv);
+    assert_dropped_without_response(session, encrypted_frame(previous_iv, PALM_UNLOCK));
+    assert_dropped_without_response(session, encrypted_frame(previous_iv, UNLOCK));
+  }
+}
+
+void test_unsupported_pending_frame_closes_action_handoff() {
+  LockSession session;
+  session.set_aes_key(TEST_KEY);
+  const auto previous_iv = make_iv(0x3E);
+  const auto next_iv = make_iv(0x5E);
+  queue_iv(previous_iv);
+  assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+  assert(session.process_frame(encrypted_frame(previous_iv, STATE_POLL)) ==
+         LockSession::Action::COMMAND);
+  queue_iv(next_iv);
+  assert(session.process_frame(iv_request()) == LockSession::Action::SEND_IV);
+  assert_dropped_without_response(session, encrypted_frame(next_iv, UNKNOWN));
+  assert_dropped_without_response(session, encrypted_frame(next_iv, UNKNOWN_METHOD_UNLOCK));
+  // Unsupported next-generation traffic still revokes the predecessor's
+  // action capability. It cannot execute an action or commit the next IV,
+  // while delayed state-only polls retain the proper response context.
+  assert_dropped_without_response(session, encrypted_frame(previous_iv, LOCK));
+  assert(session.process_frame(encrypted_frame(previous_iv, STATE_POLL)) ==
+         LockSession::Action::COMMAND);
+  assert_response_uses_iv(session, previous_iv);
+  assert(session.process_frame(encrypted_frame(next_iv, STATE_POLL)) ==
+         LockSession::Action::COMMAND);
+  assert_dropped_without_response(session, encrypted_frame(previous_iv, UNLOCK));
+  assert(session.process_frame(encrypted_frame(next_iv, UNLOCK)) ==
+         LockSession::Action::COMMAND);
+}
+
 }  // namespace
 
 uint32_t esp_random() {
@@ -852,6 +1043,12 @@ int main() {
   test_full_reset_clears_retired_generation();
   test_seq_collision_is_resolved();
   test_iv_request_requires_complete_fixed_header();
+  test_action_history_never_evicts();
+  test_unlock_padding_and_length_do_not_bypass_history();
+  test_modified_predecessor_replay_consumes_handoff();
+  test_unknown_commands_and_methods_are_dropped();
+  test_palm_unlock_uses_one_shot_handoff();
+  test_unsupported_pending_frame_closes_action_handoff();
   assert(random_values.empty());
   return 0;
 }

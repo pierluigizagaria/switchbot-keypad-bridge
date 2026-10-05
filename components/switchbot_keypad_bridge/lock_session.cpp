@@ -135,13 +135,6 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
 
   const uint8_t *ciphertext = reinterpret_cast<const uint8_t *>(frame.data() + HEADER_LEN);
 
-  // Intra-session replay protection for state-changing actions: under a
-  // fixed session IV, identical plaintexts produce identical ciphertexts.
-  // We only flag duplicates that decode to a side-effecting command — state
-  // polls are idempotent and a legitimate keypad emits them repeatedly.
-  const bool ciphertext_seen =
-      this->is_replayed_ciphertext_(context, ciphertext, ct_len);
-
   uint8_t plaintext[MAX_PAYLOAD];
   if (!this->xcrypt_(context.iv, ciphertext, ct_len, plaintext)) {
     if (uses_retired) {
@@ -164,11 +157,7 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
   // involved.
   const bool uses_predecessor =
       uses_retired || (uses_active && this->pending_.valid);
-  const bool has_known_unlock_method =
-      this->command_.method == UnlockMethod::PIN ||
-      this->command_.method == UnlockMethod::NFC ||
-      this->command_.method == UnlockMethod::FINGERPRINT ||
-      this->command_.method == UnlockMethod::FACE;
+  const bool has_known_unlock_method = unlock_method_index(this->command_.method) >= 0;
   const bool is_late_action =
       (this->command_.type == CommandType::UNLOCK && has_known_unlock_method) ||
       this->command_.type == CommandType::LOCK;
@@ -203,23 +192,40 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
   }
 
   if (this->command_.type == CommandType::UNKNOWN) {
-    ESP_LOGI(TAG, "Unhandled command: %s", format_hex_pretty(plaintext, ct_len).c_str());
+    ESP_LOGW(TAG, "Dropping unsupported keypad command");
+    if (uses_pending) {
+      // Even an unsupported attempt under the new IV closes the older action
+      // window. Do not execute or promote it, and do not leave a predecessor
+      // capability open after seeing traffic from the next generation.
+      this->active_.late_action_allowed = false;
+      this->active_.handoff_poll_seen = false;
+    }
+    if (uses_retired) {
+      this->retired_ = CryptoContext{};
+    }
+    return Action::NONE;
   }
 
   // DOORBELL is deliberately left out of the replay filter: under a fixed
   // session IV a second legitimate press in the same connection produces the
   // exact same ciphertext, and dropping it would swallow real rings. Worst
-  // case for a replayed doorbell frame is a spurious chime; a replayed
-  // lock/unlock changes security state, so only those are filtered.
+  // case for a replayed doorbell frame is a spurious chime; a repeated
+  // lock/unlock changes security state, so those actions are deduplicated.
   if (this->command_.type == CommandType::LOCK || this->command_.type == CommandType::UNLOCK) {
-    if (ciphertext_seen) {
-      ESP_LOGW(TAG, "Dropping action: ciphertext replay within session");
+    // Deduplicate the decoded action for the whole lifetime of its IV. A
+    // different padding byte or payload length must not bypass the history.
+    // The original credential byte avoids conflating two IDs through the
+    // display-index heuristic. This is not authentication:
+    // CTR still permits an attacker to forge a previously unseen action.
+    if (this->is_replayed_action_(context, this->command_)) {
+      ESP_LOGW(TAG, "Dropping repeated action within session");
+      this->command_ = DecodedCommand{};
       if (uses_retired) {
         this->retired_ = CryptoContext{};
       }
       return Action::NONE;
     }
-    this->record_ciphertext_(context, ciphertext, ct_len);
+    this->record_action_(context, this->command_);
     if (uses_predecessor) {
       context.late_action_allowed = false;
       ESP_LOGI(TAG, "Accepted one late action under predecessor IV");
@@ -232,8 +238,8 @@ LockSession::Action LockSession::process_frame(const std::string &frame) {
   this->response_iv_valid_ = true;
 
   if (uses_pending) {
-    // Only a poll can race an older credential action. A state-changing or
-    // unknown frame under pending_ commits the new generation outright.
+    // Only a poll can race an older credential action. Any other supported
+    // command under pending_ commits the new generation outright.
     const bool retain_predecessor =
         this->command_.type == CommandType::STATE_POLL && this->active_.valid &&
         this->active_.late_action_allowed;
@@ -346,29 +352,30 @@ void LockSession::ensure_pending_iv_() {
            format_hex_pretty(this->pending_.iv.data(), AES_IV_SIZE).c_str());
 }
 
-bool LockSession::is_replayed_ciphertext_(const CryptoContext &context,
-                                          const uint8_t *ciphertext,
-                                          size_t length) const {
-  if (length == 0 || length > MAX_PAYLOAD) {
+bool LockSession::is_replayed_action_(const CryptoContext &context,
+                                      const DecodedCommand &command) const {
+  if (command.type == CommandType::LOCK) {
+    return context.lock_seen;
+  }
+  const int method = unlock_method_index(command.method);
+  if (command.type != CommandType::UNLOCK || method < 0) {
     return false;
   }
-  for (const auto &entry : context.replay_history) {
-    if (entry.length == length && std::memcmp(entry.data.data(), ciphertext, length) == 0) {
-      return true;
-    }
-  }
-  return false;
+  const size_t index = command.credential_wire_index;
+  return (context.unlock_history[method][index / 8] & (1u << (index % 8))) != 0;
 }
 
-void LockSession::record_ciphertext_(CryptoContext &context,
-                                     const uint8_t *ciphertext, size_t length) {
-  if (length == 0 || length > MAX_PAYLOAD) {
+void LockSession::record_action_(CryptoContext &context, const DecodedCommand &command) {
+  if (command.type == CommandType::LOCK) {
+    context.lock_seen = true;
     return;
   }
-  ReplayEntry &slot = context.replay_history[context.replay_head];
-  std::memcpy(slot.data.data(), ciphertext, length);
-  slot.length = length;
-  context.replay_head = (context.replay_head + 1) % REPLAY_HISTORY_SIZE;
+  const int method = unlock_method_index(command.method);
+  if (command.type != CommandType::UNLOCK || method < 0) {
+    return;
+  }
+  const size_t index = command.credential_wire_index;
+  context.unlock_history[method][index / 8] |= static_cast<uint8_t>(1u << (index % 8));
 }
 
 bool LockSession::seq_matches_(const CryptoContext &context,
