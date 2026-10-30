@@ -845,6 +845,9 @@ void SwitchbotKeypadBridge::maybe_start_battery_scan_() {
   if (this->battery_scan_active_.load(std::memory_order_acquire)) {
     // NimBLE drops isScanning() when the window elapses or stop() ran.
     if (!NimBLEDevice::getScan()->isScanning()) {
+      if (this->battery_scan_wants_keypad_ && !this->keypad_battery_scan_found_) {
+        ESP_LOGD(TAG, "Battery scan window closed without a keypad advert");
+      }
       this->stop_battery_scan_();
       this->next_battery_scan_at_ = now + this->battery_scan_interval_ms_;
     }
@@ -866,10 +869,15 @@ void SwitchbotKeypadBridge::maybe_start_battery_scan_() {
   }
 
   // The scan singleton is shared with the pairing flows (which run blocking
-  // scans), and the keypad does not advertise while it holds a connection to
-  // us — defer rather than fight either.
+  // scans) and the lock relay — defer rather than fight either. A keypad
+  // connection does not block the scan: the Keypad Vision keeps its link to
+  // us open permanently, so waiting for it to drop would never scan at all.
   if (this->background_ble_busy_() ||
       NimBLEDevice::getScan()->isScanning()) {
+    ESP_LOGD(TAG, "Battery scan deferred (setup UI %s, lock relay %s, scan %s)",
+             this->pairing_ui_.is_running() ? "open" : "closed",
+             this->lock_relay_busy_.load(std::memory_order_relaxed) ? "busy" : "idle",
+             NimBLEDevice::getScan()->isScanning() ? "running" : "idle");
     this->next_battery_scan_at_ = now + BATTERY_SCAN_RETRY_MS;
     return;
   }
@@ -941,6 +949,9 @@ void SwitchbotKeypadBridge::handle_battery_advert_(const NimBLEAdvertisedDevice 
       const int battery = parse_keypad_battery(
           family, sd.data(), sd.size(),
           reinterpret_cast<const uint8_t *>(mfr.data()), mfr.size());
+      ESP_LOGD(TAG, "Keypad advert: service data %u B, mfr data %u B, battery %d",
+               static_cast<unsigned>(sd.size()), static_cast<unsigned>(mfr.size()),
+               battery);
       if (battery >= 0) {
         std::lock_guard<std::mutex> lk(this->rx_mutex_);
         this->keypad_battery_advert_value_ = battery;
@@ -1044,8 +1055,7 @@ void SwitchbotKeypadBridge::stop_battery_scan_() {
 
 bool SwitchbotKeypadBridge::background_ble_busy_() const {
   return this->pairing_ui_.is_running() ||
-         this->lock_relay_busy_.load(std::memory_order_relaxed) ||
-         (this->server_ != nullptr && this->server_->getConnectedCount() > 0);
+         this->lock_relay_busy_.load(std::memory_order_relaxed);
 }
 
 void SwitchbotKeypadBridge::clear_lock_battery_() {
