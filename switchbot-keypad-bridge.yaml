@@ -67,6 +67,22 @@ switchbot_keypad_bridge:
         data:
           method: !lambda 'return method;'
           index: !lambda 'return to_string(index);'
+    - text_sensor.template.publish:
+        id: method_template
+        state: !lambda 'return method;'
+    - text_sensor.template.publish:
+        id: index_template
+        state: !lambda 'return to_string(index);'
+
+text_sensor:
+  - platform: template
+    name: "Method"
+    id: method_template
+
+
+  - platform: template
+    name: "Index"
+    id: index_template
   
   # on_lock:
   #   - logger.log: "Locked"
