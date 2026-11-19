@@ -4,6 +4,9 @@
 
 #include <esp_random.h>
 
+#if __has_include("esphome/core/alloc_helpers.h") // Check if alloc_helpers.h is available
+#include "esphome/core/alloc_helpers.h"
+#endif
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "aes_ctr.h"
