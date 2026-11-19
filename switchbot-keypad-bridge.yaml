@@ -67,12 +67,31 @@ switchbot_keypad_bridge:
         data:
           method: !lambda 'return method;'
           index: !lambda 'return to_string(index);'
-  
-  # on_lock:
-  #   - logger.log: "Locked"
+    - text_sensor.template.publish:
+        id: method_template
+        state: !lambda 'return method;'
+    - text_sensor.template.publish:
+        id: index_template
+        state: !lambda 'return to_string(index);'
 
-  # on_doorbell:
-  #   - logger.log: "Doorbell pressed"
+text_sensor:
+  - platform: template
+    name: "Method"
+    id: method_template
+    # disabled_by_default: true
+
+
+
+  - platform: template
+    name: "Index"
+    id: index_template
+     # disabled_by_default: true
+
+# on_lock:
+#   - logger.log: "Locked"
+
+# on_doorbell:
+#   - logger.log: "Doorbell pressed"
 
 # Optional button to manually rearm face/palm unlock using the same action.
 # button:
