@@ -8,6 +8,8 @@
 #include "esphome/core/log.h"
 #include "aes_ctr.h"
 
+#include "esphome/core/alloc_helpers.h"
+
 namespace esphome {
 namespace switchbot_keypad_bridge {
 
