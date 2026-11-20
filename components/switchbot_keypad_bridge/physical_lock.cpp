@@ -13,6 +13,8 @@
 #include "ble_utils.h"
 #include "mac_utils.h"
 
+#include "esphome/core/alloc_helpers.h"
+
 namespace esphome {
 namespace switchbot_keypad_bridge {
 
