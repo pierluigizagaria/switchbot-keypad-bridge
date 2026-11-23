@@ -42,6 +42,18 @@ std::array<uint8_t, 6> addr_bytes(const NimBLEAddress &addr);
 // 0xFD3D service data rides in the scan response.
 void configure_switchbot_scan(NimBLEScan *scan);
 
+// Open a BLE link without any GATT discovery. Returns the connected client,
+// or nullptr (client already freed) with `error_out` set.
+NimBLEClient *connect_switchbot_link(const NimBLEAddress &target, uint32_t timeout_ms,
+                                     const char *device_label, std::string &error_out);
+
+// Discover the SwitchBot service and its RX/TX characteristics on an open
+// link. Leaves the link open on failure; the caller disconnects.
+bool discover_switchbot_service(NimBLEClient *client, const char *device_label,
+                                SwitchbotGattConnection &conn, std::string &error_out);
+
+// connect_switchbot_link() + discover_switchbot_service(); disconnects and
+// frees the client on failure.
 bool connect_switchbot_service(const NimBLEAddress &target, uint32_t timeout_ms,
                                const char *device_label,
                                SwitchbotGattConnection &conn,
