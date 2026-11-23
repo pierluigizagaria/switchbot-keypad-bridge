@@ -214,9 +214,9 @@ switchbot_keypad_bridge:
     name: "Lock"
 ```
 
-Supported lock families: Lock, Lock Lite, Lock Pro, Lock Pro Wi-Fi, Lock Ultra,
-Lock Vision and Lock Vision Pro. Keep the lock near the ESP32 during setup; the
-wizard only enables linking for locks it can see over BLE.
+Lock families: Lock, Lock Lite, Lock Pro, Lock Pro Wi-Fi, Lock Ultra, Lock Ultra
+Max (experimental), Lock Vision and Lock Vision Pro. Keep the lock near the
+ESP32 during setup. The wizard only enables linking for locks it can see over BLE.
 
 ## 🔔 Doorbell (Keypad Vision)
 
@@ -448,10 +448,11 @@ lock directly.
 <details>
 <summary><b>Which physical locks can be linked?</b></summary>
 
-The relay recognises the supported SwitchBot Lock families exposed by the cloud
-API: Lock, Lock Lite, Lock Pro, Lock Pro Wi-Fi, Lock Ultra, Lock Vision and Lock
-Vision Pro. The wizard only offers devices from your SwitchBot account that
-match those lock types.
+The wizard recognises Lock, Lock Lite, Lock Pro, Lock Pro Wi-Fi, Lock Ultra,
+Lock Ultra Max (experimental), Lock Vision and Lock Vision Pro in your SwitchBot
+account. It can identify a nearby Lock Ultra Max over BLE if the account returns
+an unrecognised model code. Lock Ultra Max still needs an end-to-end test with a
+physical lock and keypad.
 </details>
 
 <details>

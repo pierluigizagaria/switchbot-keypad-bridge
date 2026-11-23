@@ -84,6 +84,7 @@ const uint8_t *lock_info_plaintext(PhysicalLockModel model, size_t &len) {
       len = sizeof(PRO);
       return PRO;
     case PhysicalLockModel::LOCK_ULTRA:
+    case PhysicalLockModel::LOCK_ULTRA_MAX:
       len = sizeof(ULTRA);
       return ULTRA;
     case PhysicalLockModel::LOCK_VISION:
@@ -123,6 +124,8 @@ const char *physical_lock_model_str(PhysicalLockModel model) {
       return "lock_pro";
     case PhysicalLockModel::LOCK_ULTRA:
       return "lock_ultra";
+    case PhysicalLockModel::LOCK_ULTRA_MAX:
+      return "lock_ultra_max";
     case PhysicalLockModel::LOCK_VISION:
       return "lock_vision";
     case PhysicalLockModel::LOCK_VISION_PRO:
@@ -139,6 +142,8 @@ PhysicalLockModel physical_lock_model_from_api_type(const std::string &device_ty
   if (device_type == "WoLockLite") return PhysicalLockModel::LOCK_LITE;
   if (device_type == "WoLockPro") return PhysicalLockModel::LOCK_PRO;
   if (device_type == "W1091000") return PhysicalLockModel::LOCK_ULTRA;
+  if (device_type == "W104000000" || device_type == "W110000000")
+    return PhysicalLockModel::LOCK_ULTRA_MAX;
   if (device_type == "W1141000") return PhysicalLockModel::LOCK_VISION;
   if (device_type == "W1141001") return PhysicalLockModel::LOCK_VISION_PRO;
   if (device_type == "W1114000") return PhysicalLockModel::LOCK_PRO_WIFI;
@@ -160,6 +165,9 @@ bool lock_status_byte_plausible(PhysicalLockModel model, uint8_t state) {
     case PhysicalLockModel::LOCK_ULTRA:
     case PhysicalLockModel::LOCK_PRO_WIFI:
       return ((state & 0x78) >> 3) <= 6;
+    case PhysicalLockModel::LOCK_ULTRA_MAX:
+      // The Lock 2 status enum also allows 7 (half-locked on EU firmware).
+      return ((state & 0x78) >> 3) <= 7;
     default:
       return false;
   }

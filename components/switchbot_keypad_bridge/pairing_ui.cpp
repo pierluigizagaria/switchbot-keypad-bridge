@@ -11,6 +11,7 @@
 #include "esphome/core/log.h"
 #include "ble_utils.h"
 #include "keypad_advert.h"
+#include "lock_advert.h"
 #include "mac_utils.h"
 
 namespace esphome {
@@ -284,7 +285,7 @@ std::string job_started_json_(const std::string &job_id, uint8_t step_count,
 }
 
 // One nearby BLE device: strongest RSSI seen plus its SwitchBot service-data
-// blob (so the UI can identify the keypad model the pySwitchbot way). rssi
+// blob (so the UI can identify device models from their advertisements). rssi
 // starts below any real BLE reading so the first packet always wins.
 struct NearbyDevice {
   int rssi{-128};
@@ -432,10 +433,14 @@ esp_err_t PairingUi::handle_locks_(httpd_req_t *req) {
   cJSON *arr = cJSON_CreateArray();
   unsigned shown = 0;
   for (const auto &dev : devices) {
-    const PhysicalLockModel model = physical_lock_model_from_api_type(dev.device_type);
+    const auto hit = nearby.find(dev.mac_pretty);
+    PhysicalLockModel model = physical_lock_model_from_api_type(dev.device_type);
+    if (model == PhysicalLockModel::UNKNOWN && hit != nearby.end() &&
+        is_lock_ultra_max_advert(hit->second.svc_data.data(), hit->second.svc_data.size())) {
+      model = PhysicalLockModel::LOCK_ULTRA_MAX;
+    }
     if (model == PhysicalLockModel::UNKNOWN) continue;
 
-    const auto hit = nearby.find(dev.mac_pretty);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "mac", dev.mac_pretty.c_str());
     cJSON_AddStringToObject(o, "name", dev.name.c_str());
@@ -486,7 +491,15 @@ esp_err_t PairingUi::handle_lock_link_(httpd_req_t *req) {
     return reply_error_(req, "404 Not Found", "Lock not in this SwitchBot account.");
   }
 
-  const PhysicalLockModel model = physical_lock_model_from_api_type(found->device_type);
+  PhysicalLockModel model = physical_lock_model_from_api_type(found->device_type);
+  if (model == PhysicalLockModel::UNKNOWN) {
+    const auto nearby = scan_nearby(8000);
+    const auto hit = nearby.find(found->mac_pretty);
+    if (hit != nearby.end() &&
+        is_lock_ultra_max_advert(hit->second.svc_data.data(), hit->second.svc_data.size())) {
+      model = PhysicalLockModel::LOCK_ULTRA_MAX;
+    }
+  }
   if (model == PhysicalLockModel::UNKNOWN) {
     return reply_error_(req, "400 Bad Request", "This SwitchBot device is not a supported Lock.");
   }
