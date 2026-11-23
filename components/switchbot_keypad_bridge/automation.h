@@ -15,6 +15,24 @@ template<typename... Ts> class RearmAction : public Action<Ts...> {
   SwitchbotKeypadBridge *parent_;
 };
 
+template<typename... Ts> class ApproveAction : public Action<Ts...> {
+ public:
+  explicit ApproveAction(SwitchbotKeypadBridge *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->approve(); }
+
+ protected:
+  SwitchbotKeypadBridge *parent_;
+};
+
+template<typename... Ts> class DenyAction : public Action<Ts...> {
+ public:
+  explicit DenyAction(SwitchbotKeypadBridge *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->deny(); }
+
+ protected:
+  SwitchbotKeypadBridge *parent_;
+};
+
 class LockTrigger : public Trigger<> {
  public:
   explicit LockTrigger(SwitchbotKeypadBridge *parent) {

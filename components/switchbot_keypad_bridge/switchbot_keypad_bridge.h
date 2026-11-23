@@ -77,10 +77,33 @@ class SwitchbotKeypadBridge : public Component {
   }
   void set_battery_scan_interval(uint32_t ms) { this->battery_scan_interval_ms_ = ms; }
   void set_rearm_after(uint32_t ms) { this->keypad_state_.set_rearm_after(ms); }
+  // Optional Home Assistant approval gate for the physical lock relay.
+  // While Home Assistant is connected, a keypad Unlock is held until approve(),
+  // deny() or the timeout. Without a Home Assistant connection the relay runs
+  // immediately, exactly as without this option (fallback).
+  void set_approval(uint32_t timeout_ms, bool relay_on_timeout) {
+    this->approval_enabled_ = true;
+    this->approval_timeout_ms_ = timeout_ms;
+    this->approval_relay_on_timeout_ = relay_on_timeout;
+  }
 
   // Report LOCKED on the next keypad poll, without operating a physical lock
   // or publishing a Lock event. Safe to call from local ESPHome automations.
   void rearm();
+  // Release (approve) or drop (deny) the unlock waiting for approval.
+  void approve();
+  void deny();
+  // Same, but only if the waiting unlock matches method ("fingerprint", …) and
+  // credential index – a late answer can never apply to a different unlock.
+  void approve(const std::string &method, int index);
+  void deny(const std::string &method, int index);
+  // Fallback policy used while Home Assistant cannot answer (not connected, or
+  // no answer within the approval timeout). Persisted in NVS so it also holds
+  // after a reboot without Home Assistant.
+  //   mode 0 = relay every unlock (default), 1 = relay only credentials in
+  //   `allow_list`, 2 = relay none.
+  //   allow_list = "fingerprint:0,face:2,pin:1" (method : reported index).
+  void set_fallback(int mode, const std::string &allow_list);
 
   bool is_pairing_active() const { return this->pairing_ui_.is_running(); }
 
@@ -157,6 +180,15 @@ class SwitchbotKeypadBridge : public Component {
   // one-shot background task. The keypad is never answered from this path;
   // relay completion is logged only.
   bool relay_to_lock_async_(const FrameHeader &header, const DecodedCommand &command);
+  // Same relay from an already captured plaintext (used for held unlocks,
+  // whose session buffer has been reused by later frames).
+  bool relay_plaintext_async_(uint8_t key_id, std::vector<uint8_t> plaintext,
+                              const DecodedCommand &command);
+  // ----- Home Assistant approval gate ----------------------------------------
+  bool home_assistant_connected_() const;
+  void hold_for_approval_(const FrameHeader &header, const DecodedCommand &command);
+  void release_pending_approval_(const char *reason);
+  void check_pending_approval_();
   PhysicalLockClient::Config physical_lock_config_(uint8_t slot_id) const;
 
   // ----- Transport helpers ---------------------------------------------------
@@ -249,6 +281,18 @@ class SwitchbotKeypadBridge : public Component {
   // NVS, rotated by reset_pairing(). Never part of the YAML config.
   std::array<uint8_t, 16> shared_key_{};
   ESPPreferenceObject shared_key_pref_;
+
+  // Fallback policy (see set_fallback()).
+  static constexpr size_t FALLBACK_MAX = 48;
+  struct FallbackPolicy {
+    uint8_t mode{0};
+    uint8_t count{0};
+    uint8_t method[FALLBACK_MAX]{};
+    int16_t index[FALLBACK_MAX]{};
+  };
+  FallbackPolicy fallback_{};
+  ESPPreferenceObject fallback_pref_;
+  bool fallback_allows_(const DecodedCommand &command) const;
   ESPPreferenceObject keypad_name_pref_;
   ESPPreferenceObject linked_lock_pref_;
 
@@ -270,6 +314,22 @@ class SwitchbotKeypadBridge : public Component {
   // True while the relay task owns physical_lock_client_ and the central
   // role; battery scans defer to it.
   std::atomic<bool> lock_relay_busy_{false};
+
+  // Home Assistant approval gate (off unless `approval:` is configured).
+  struct PendingApproval {
+    bool active{false};
+    uint8_t key_id{0};
+    std::vector<uint8_t> plaintext;
+    DecodedCommand command{};
+    uint32_t deadline{0};
+    bool approved{false};       // approved, relay pending (lock relay was busy)
+    uint32_t relay_until{0};    // give up retrying the relay after this
+  };
+  bool pending_matches_(const std::string &method, int index) const;
+  bool approval_enabled_{false};
+  uint32_t approval_timeout_ms_{2000};
+  bool approval_relay_on_timeout_{true};
+  PendingApproval pending_approval_;
   // Relay outcome, written by the relay task and consumed by loop() for
   // logging only. Fields are stable while the flag is false→true (single
   // relay in flight, release/acquire pairing).

@@ -55,6 +55,9 @@ CONF_KEYPAD_BATTERY_LEVEL = "keypad_battery_level"
 CONF_LOCK_BATTERY_LEVEL = "lock_battery_level"
 CONF_BATTERY_SCAN_INTERVAL = "battery_scan_interval"
 CONF_REARM_AFTER = "rearm_after"
+CONF_APPROVAL = "approval"
+CONF_TIMEOUT = "timeout"
+CONF_ON_TIMEOUT = "on_timeout"
 CONF_RESET_BUTTON = "reset_button"
 CONF_ON_LOCK = "on_lock"
 CONF_ON_UNLOCK = "on_unlock"
@@ -75,6 +78,8 @@ SwitchbotKeypadBridge = switchbot_keypad_bridge_ns.class_(
 )
 ResetButton = switchbot_keypad_bridge_ns.class_("ResetButton", button.Button)
 RearmAction = switchbot_keypad_bridge_ns.class_("RearmAction", automation.Action)
+ApproveAction = switchbot_keypad_bridge_ns.class_("ApproveAction", automation.Action)
+DenyAction = switchbot_keypad_bridge_ns.class_("DenyAction", automation.Action)
 LockTrigger = switchbot_keypad_bridge_ns.class_(
     "LockTrigger", automation.Trigger.template()
 )
@@ -139,6 +144,16 @@ CONFIG_SCHEMA = cv.Schema(
         ): cv.All(
             cv.positive_time_period_milliseconds,
             cv.Range(max=TimePeriod(milliseconds=0x7FFFFFFF)),
+        ),
+        cv.Optional(CONF_APPROVAL): cv.Schema(
+            {
+                cv.Optional(
+                    CONF_TIMEOUT, default="2s"
+                ): cv.positive_time_period_milliseconds,
+                cv.Optional(CONF_ON_TIMEOUT, default="relay"): cv.one_of(
+                    "relay", "drop", lower=True
+                ),
+            }
         ),
         cv.Optional(CONF_PAIRING_UI): _deprecated_pairing_ui,
         cv.Optional(CONF_RESET_BUTTON): button.button_schema(
@@ -218,10 +233,38 @@ async def rearm_to_code(config, action_id, template_arg, args):
     return cg.new_Pvariable(action_id, template_arg, parent)
 
 
+_PARENT_ONLY = cv.maybe_simple_value(
+    {cv.Required(CONF_ID): cv.use_id(SwitchbotKeypadBridge)}, key=CONF_ID
+)
+
+
+@automation.register_action(
+    "switchbot_keypad_bridge.approve", ApproveAction, _PARENT_ONLY, synchronous=True
+)
+async def approve_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
+@automation.register_action(
+    "switchbot_keypad_bridge.deny", DenyAction, _PARENT_ONLY, synchronous=True
+)
+async def deny_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, parent)
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_rearm_after(config[CONF_REARM_AFTER].total_milliseconds))
+    if approval := config.get(CONF_APPROVAL):
+        cg.add(
+            var.set_approval(
+                approval[CONF_TIMEOUT].total_milliseconds,
+                approval[CONF_ON_TIMEOUT] == "relay",
+            )
+        )
 
     if keypad_conf := config.get(CONF_KEYPAD_ACTION):
         keypad = await event.new_event(

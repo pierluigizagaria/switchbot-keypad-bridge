@@ -320,6 +320,81 @@ including documentation and an external-lock automation example, followed by
 [#30 by dr-apple](https://github.com/pierluigizagaria/switchbot-keypad-bridge/pull/30).
 Both contributions informed this shared action and configurable timer.
 
+## ✅ Home Assistant approval (optional)
+
+With a physical lock linked, the bridge normally relays every keypad Unlock
+immediately. The optional `approval:` block lets Home Assistant decide first —
+for example per person, per time of day or depending on presence — while the
+door never depends on Home Assistant:
+
+- **Home Assistant connected** – an Unlock is held until `approve`, `deny` or
+  the timeout. Approved unlocks are relayed to the lock as usual, denied ones
+  are dropped.
+- **Home Assistant not connected** (restart, crash, Wi-Fi down) – the Unlock is
+  relayed immediately, exactly as without this option (fallback).
+- **No answer within `timeout`** – `on_timeout: relay` (default) opens anyway,
+  `on_timeout: drop` keeps the door locked.
+
+Lock commands are always relayed immediately. The keypad still gets its local
+answer right away, so it shows success even when Home Assistant denies.
+
+```yaml
+api:
+  actions:
+    # method/index make sure a late answer never applies to a different unlock
+    - action: approve_unlock
+      variables:
+        method: string
+        index: int
+      then:
+        - lambda: 'id(keypad_bridge).approve(method, index);'
+    - action: deny_unlock
+      variables:
+        method: string
+        index: int
+      then:
+        - lambda: 'id(keypad_bridge).deny(method, index);'
+
+switchbot_keypad_bridge:
+  id: keypad_bridge
+  approval:
+    timeout: 2s
+    on_timeout: relay   # relay | drop
+  on_unlock:
+    - homeassistant.event:
+        event: esphome.switchbot_keypad_unlock
+        data:
+          method: !lambda 'return method;'
+          index: !lambda 'return to_string(index);'
+```
+
+### Fallback policy
+
+What happens without Home Assistant (not connected, or no answer within
+`timeout`) can be restricted per credential. Home Assistant sends the policy
+with an API action; the bridge stores it in flash, so it also applies after a
+reboot while Home Assistant is down:
+
+```yaml
+api:
+  actions:
+    - action: set_fallback
+      variables:
+        mode: int      # 0 = relay every unlock (default), 1 = only the list, 2 = none
+        allow: string  # e.g. "fingerprint:0,face:2,pin:1" (method:index)
+      then:
+        - lambda: 'id(keypad_bridge).set_fallback(mode, allow);'
+```
+
+With mode `2` the door stays locked whenever Home Assistant cannot answer —
+keep a key or another way in.
+
+Home Assistant then answers each `esphome.switchbot_keypad_unlock` event by
+calling `esphome.<device>_approve_unlock` or `esphome.<device>_deny_unlock`
+with the event's `method` and `index`
+(from an automation or an integration). Any API client counts as "connected",
+including an open ESPHome log stream.
+
 ## 🔋 Battery sensors
 
 The keypad and linked physical lock broadcast their battery levels in BLE
@@ -352,6 +427,12 @@ switchbot_keypad_bridge:
 | `on_lock` | automation | no | Triggered on every `lock` command. |
 | `on_unlock` | automation | no | Triggered on every `unlock` command — parameters `(std::string method, int index)`. |
 | `on_doorbell` | automation | no | Triggered on every doorbell press (Keypad Vision). No parameters. |
+| `approval` | object | no | Hold keypad Unlocks for Home Assistant approval while it is connected: `timeout` (default `2s`) and `on_timeout` (`relay` default, or `drop`). Without a Home Assistant connection unlocks are relayed immediately. |
+
+Automation actions `switchbot_keypad_bridge.approve: <bridge_id>` and
+`switchbot_keypad_bridge.deny: <bridge_id>` release or drop the Unlock that is
+waiting for approval (prefer the lambda `approve(method, index)` /
+`deny(method, index)`, which only apply to the matching unlock) (see [Home Assistant approval](#-home-assistant-approval-optional)).
 
 Automation action: `switchbot_keypad_bridge.rearm: <bridge_id>` (or
 `switchbot_keypad_bridge.rearm: {id: <bridge_id>}`) reports the emulated lock
