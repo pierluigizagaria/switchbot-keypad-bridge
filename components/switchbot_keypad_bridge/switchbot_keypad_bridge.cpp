@@ -11,6 +11,9 @@
 
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#ifdef USE_API
+#include "esphome/components/api/api_server.h"
+#endif
 #include "ble_utils.h"
 #include "keypad_advert.h"
 #include "mac_utils.h"
@@ -241,6 +244,7 @@ void SwitchbotKeypadBridge::loop() {
   this->apply_pending_pairing_();
   this->apply_pending_lock_link_();
   this->apply_pending_lock_relay_();
+  this->check_pending_approval_();
   this->update_rearm_timer_();
 
   // Idle-close the wizard only once a keypad is linked: with nothing linked
@@ -426,6 +430,83 @@ void SwitchbotKeypadBridge::rearm() {
   ESP_LOGI(TAG, "Reporting locked state on the next keypad poll (rearm)");
 }
 
+// ---------------------------------------------------------------------------
+// Home Assistant approval gate
+// ---------------------------------------------------------------------------
+
+bool SwitchbotKeypadBridge::home_assistant_connected_() const {
+#ifdef USE_API
+  return api::global_api_server != nullptr && api::global_api_server->is_connected();
+#else
+  return false;
+#endif
+}
+
+void SwitchbotKeypadBridge::hold_for_approval_(const FrameHeader &header, const DecodedCommand &command) {
+  if (this->session_.plaintext_size() == 0) {
+    ESP_LOGW(TAG, "Cannot hold Unlock for approval: no decrypted keypad plaintext");
+    return;
+  }
+  if (this->pending_approval_.active) {
+    // Only one unlock can wait; a newer one replaces the older (the keypad
+    // already got its local answer for both).
+    ESP_LOGW(TAG, "Previous Unlock still waiting for approval — replaced by the new one");
+  }
+  this->pending_approval_.active = true;
+  this->pending_approval_.key_id = header.key_id;
+  this->pending_approval_.plaintext.assign(this->session_.plaintext(),
+                                           this->session_.plaintext() + this->session_.plaintext_size());
+  this->pending_approval_.command = command;
+  this->pending_approval_.deadline = millis() + this->approval_timeout_ms_;
+  ESP_LOGI(TAG, "Unlock waiting for Home Assistant approval (%u ms)",
+           static_cast<unsigned>(this->approval_timeout_ms_));
+}
+
+void SwitchbotKeypadBridge::release_pending_approval_(const char *reason) {
+  PendingApproval p = std::move(this->pending_approval_);
+  this->pending_approval_ = PendingApproval{};
+  ESP_LOGI(TAG, "Relaying held Unlock to the physical lock (%s)", reason);
+  if (!this->relay_plaintext_async_(p.key_id, std::move(p.plaintext), p.command)) {
+    ESP_LOGW(TAG, "Physical lock relay unavailable for the approved Unlock");
+  }
+}
+
+void SwitchbotKeypadBridge::check_pending_approval_() {
+  if (!this->pending_approval_.active) {
+    return;
+  }
+  if (!this->home_assistant_connected_()) {
+    this->release_pending_approval_("Home Assistant disconnected — fallback");
+    return;
+  }
+  if (static_cast<int32_t>(millis() - this->pending_approval_.deadline) < 0) {
+    return;
+  }
+  if (this->approval_relay_on_timeout_) {
+    this->release_pending_approval_("no answer from Home Assistant — fallback");
+  } else {
+    this->pending_approval_ = PendingApproval{};
+    ESP_LOGW(TAG, "No answer from Home Assistant — Unlock dropped (on_timeout: drop)");
+  }
+}
+
+void SwitchbotKeypadBridge::approve() {
+  if (!this->pending_approval_.active) {
+    ESP_LOGD(TAG, "Approve: no Unlock waiting");
+    return;
+  }
+  this->release_pending_approval_("approved by Home Assistant");
+}
+
+void SwitchbotKeypadBridge::deny() {
+  if (!this->pending_approval_.active) {
+    ESP_LOGD(TAG, "Deny: no Unlock waiting");
+    return;
+  }
+  this->pending_approval_ = PendingApproval{};
+  ESP_LOGI(TAG, "Unlock denied by Home Assistant — not relayed");
+}
+
 void SwitchbotKeypadBridge::update_rearm_timer_() {
   if (this->keypad_state_.update(millis())) {
     ESP_LOGI(TAG, "Face/palm rearm timer expired; reporting locked state on the next keypad poll");
@@ -589,8 +670,21 @@ void SwitchbotKeypadBridge::handle_command_(const FrameHeader &header, const Dec
   if (this->lock_linked_) {
     this->send_local_response_(header, command);
     switch (command.type) {
-      case CommandType::LOCK:
       case CommandType::UNLOCK:
+        // Optional approval gate: let Home Assistant decide while it is
+        // connected; otherwise fall through to the immediate relay.
+        if (this->approval_enabled_ && this->home_assistant_connected_()) {
+          this->hold_for_approval_(header, command);
+          return;
+        }
+        if (this->approval_enabled_) {
+          ESP_LOGI(TAG, "Home Assistant not connected — relaying Unlock without approval (fallback)");
+        }
+        if (!this->relay_to_lock_async_(header, command)) {
+          ESP_LOGW(TAG, "Physical lock relay unavailable after local keypad response");
+        }
+        return;
+      case CommandType::LOCK:
         if (!this->relay_to_lock_async_(header, command)) {
           ESP_LOGW(TAG, "Physical lock relay unavailable after local keypad response");
         }
@@ -665,6 +759,18 @@ bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
     ESP_LOGW(TAG, "Cannot relay command: no decrypted keypad plaintext");
     return false;
   }
+  return this->relay_plaintext_async_(
+      header.key_id,
+      {this->session_.plaintext(), this->session_.plaintext() + this->session_.plaintext_size()},
+      command);
+}
+
+bool SwitchbotKeypadBridge::relay_plaintext_async_(uint8_t key_id, std::vector<uint8_t> plaintext,
+                                                   const DecodedCommand &command) {
+  if (plaintext.empty()) {
+    ESP_LOGW(TAG, "Cannot relay command: empty plaintext");
+    return false;
+  }
   if (this->lock_relay_busy_.exchange(true)) {
     ESP_LOGW(TAG, "Lock relay still in flight — answering this command locally");
     return false;
@@ -681,11 +787,7 @@ bool SwitchbotKeypadBridge::relay_to_lock_async_(const FrameHeader &header,
     std::vector<uint8_t> plaintext;
     DecodedCommand command;
   };
-  auto *ctx = new RelayCtx{
-      this, this->physical_lock_config_(header.key_id),
-      {this->session_.plaintext(),
-       this->session_.plaintext() + this->session_.plaintext_size()},
-      command};
+  auto *ctx = new RelayCtx{this, this->physical_lock_config_(key_id), std::move(plaintext), command};
 
   BaseType_t rc = xTaskCreatePinnedToCore(
       [](void *raw) {

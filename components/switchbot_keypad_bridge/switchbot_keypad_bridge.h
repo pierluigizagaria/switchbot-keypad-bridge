@@ -77,10 +77,22 @@ class SwitchbotKeypadBridge : public Component {
   }
   void set_battery_scan_interval(uint32_t ms) { this->battery_scan_interval_ms_ = ms; }
   void set_rearm_after(uint32_t ms) { this->keypad_state_.set_rearm_after(ms); }
+  // Optional Home Assistant approval gate for the physical lock relay.
+  // While Home Assistant is connected, a keypad Unlock is held until approve(),
+  // deny() or the timeout. Without a Home Assistant connection the relay runs
+  // immediately, exactly as without this option (fallback).
+  void set_approval(uint32_t timeout_ms, bool relay_on_timeout) {
+    this->approval_enabled_ = true;
+    this->approval_timeout_ms_ = timeout_ms;
+    this->approval_relay_on_timeout_ = relay_on_timeout;
+  }
 
   // Report LOCKED on the next keypad poll, without operating a physical lock
   // or publishing a Lock event. Safe to call from local ESPHome automations.
   void rearm();
+  // Release (approve) or drop (deny) the unlock waiting for approval.
+  void approve();
+  void deny();
 
   bool is_pairing_active() const { return this->pairing_ui_.is_running(); }
 
@@ -157,6 +169,15 @@ class SwitchbotKeypadBridge : public Component {
   // one-shot background task. The keypad is never answered from this path;
   // relay completion is logged only.
   bool relay_to_lock_async_(const FrameHeader &header, const DecodedCommand &command);
+  // Same relay from an already captured plaintext (used for held unlocks,
+  // whose session buffer has been reused by later frames).
+  bool relay_plaintext_async_(uint8_t key_id, std::vector<uint8_t> plaintext,
+                              const DecodedCommand &command);
+  // ----- Home Assistant approval gate ----------------------------------------
+  bool home_assistant_connected_() const;
+  void hold_for_approval_(const FrameHeader &header, const DecodedCommand &command);
+  void release_pending_approval_(const char *reason);
+  void check_pending_approval_();
   PhysicalLockClient::Config physical_lock_config_(uint8_t slot_id) const;
 
   // ----- Transport helpers ---------------------------------------------------
@@ -270,6 +291,19 @@ class SwitchbotKeypadBridge : public Component {
   // True while the relay task owns physical_lock_client_ and the central
   // role; battery scans defer to it.
   std::atomic<bool> lock_relay_busy_{false};
+
+  // Home Assistant approval gate (off unless `approval:` is configured).
+  struct PendingApproval {
+    bool active{false};
+    uint8_t key_id{0};
+    std::vector<uint8_t> plaintext;
+    DecodedCommand command{};
+    uint32_t deadline{0};
+  };
+  bool approval_enabled_{false};
+  uint32_t approval_timeout_ms_{2000};
+  bool approval_relay_on_timeout_{true};
+  PendingApproval pending_approval_;
   // Relay outcome, written by the relay task and consumed by loop() for
   // logging only. Fields are stable while the flag is false→true (single
   // relay in flight, release/acquire pairing).
