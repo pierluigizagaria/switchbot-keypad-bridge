@@ -1,6 +1,7 @@
 #include "switchbot_keypad_bridge.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -128,6 +129,11 @@ void SwitchbotKeypadBridge::push_rx_(const std::string &frame) {
 // ---------------------------------------------------------------------------
 
 void SwitchbotKeypadBridge::setup() {
+  this->fallback_pref_ = global_preferences->make_preference<FallbackPolicy>(0x53464C42UL /* 'SFLB' */);
+  if (!this->fallback_pref_.load(&this->fallback_) || this->fallback_.mode > 2 ||
+      this->fallback_.count > FALLBACK_MAX) {
+    this->fallback_ = FallbackPolicy{};
+  }
   // Load — or, on first boot, generate — the 16-byte AES-128 session key.
   // reset_pairing() rotates it; it is never part of the YAML config.
   this->shared_key_pref_ =
@@ -475,19 +481,71 @@ void SwitchbotKeypadBridge::check_pending_approval_() {
   if (!this->pending_approval_.active) {
     return;
   }
-  if (!this->home_assistant_connected_()) {
-    this->release_pending_approval_("Home Assistant disconnected — fallback");
+  const bool disconnected = !this->home_assistant_connected_();
+  if (!disconnected && static_cast<int32_t>(millis() - this->pending_approval_.deadline) < 0) {
     return;
   }
-  if (static_cast<int32_t>(millis() - this->pending_approval_.deadline) < 0) {
-    return;
-  }
-  if (this->approval_relay_on_timeout_) {
-    this->release_pending_approval_("no answer from Home Assistant — fallback");
+  if ((disconnected || this->approval_relay_on_timeout_) &&
+      this->fallback_allows_(this->pending_approval_.command)) {
+    this->release_pending_approval_(disconnected ? "Home Assistant disconnected — fallback"
+                                                 : "no answer from Home Assistant — fallback");
   } else {
     this->pending_approval_ = PendingApproval{};
-    ESP_LOGW(TAG, "No answer from Home Assistant — Unlock dropped (on_timeout: drop)");
+    ESP_LOGW(TAG, "No answer from Home Assistant — Unlock dropped (on_timeout / fallback policy)");
   }
+}
+
+bool SwitchbotKeypadBridge::fallback_allows_(const DecodedCommand &command) const {
+  if (this->fallback_.mode == 0) {
+    return true;
+  }
+  if (this->fallback_.mode == 2) {
+    return false;
+  }
+  for (uint8_t i = 0; i < this->fallback_.count && i < FALLBACK_MAX; i++) {
+    if (this->fallback_.method[i] == static_cast<uint8_t>(command.method) &&
+        this->fallback_.index[i] == command.credential_index) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void SwitchbotKeypadBridge::set_fallback(int mode, const std::string &allow_list) {
+  static const UnlockMethod METHODS[] = {UnlockMethod::PIN, UnlockMethod::NFC, UnlockMethod::FINGERPRINT,
+                                         UnlockMethod::FACE, UnlockMethod::PALM};
+  FallbackPolicy policy{};
+  policy.mode = static_cast<uint8_t>(mode < 0 || mode > 2 ? 0 : mode);
+  size_t start = 0;
+  while (start < allow_list.size() && policy.count < FALLBACK_MAX) {
+    size_t end = allow_list.find(',', start);
+    if (end == std::string::npos) {
+      end = allow_list.size();
+    }
+    const std::string item = allow_list.substr(start, end - start);
+    const size_t colon = item.find(':');
+    if (colon != std::string::npos) {
+      const std::string name = item.substr(0, colon);
+      const int index = atoi(item.c_str() + colon + 1);
+      for (UnlockMethod m : METHODS) {
+        if (name == unlock_method_name(m)) {
+          policy.method[policy.count] = static_cast<uint8_t>(m);
+          policy.index[policy.count] = static_cast<int16_t>(index);
+          policy.count++;
+          break;
+        }
+      }
+    }
+    start = end + 1;
+  }
+  const bool changed = std::memcmp(&policy, &this->fallback_, sizeof(policy)) != 0;
+  this->fallback_ = policy;
+  if (changed) {
+    this->fallback_pref_.save(&this->fallback_);
+    global_preferences->sync();
+  }
+  ESP_LOGI(TAG, "Fallback policy: mode %u, %u allowed credential(s)%s", policy.mode, policy.count,
+           changed ? " (saved)" : "");
 }
 
 void SwitchbotKeypadBridge::approve() {
@@ -519,6 +577,10 @@ void SwitchbotKeypadBridge::dump_config() {
   ESP_LOGCONFIG(TAG, "  Setup UI: port 80");
   ESP_LOGCONFIG(TAG, "  Face/palm rearm after: %ums (0 = disabled)",
                 static_cast<unsigned>(this->keypad_state_.rearm_after()));
+  if (this->approval_enabled_) {
+    ESP_LOGCONFIG(TAG, "  Home Assistant approval: timeout %u ms, fallback mode %u (%u allowed)",
+                  static_cast<unsigned>(this->approval_timeout_ms_), this->fallback_.mode, this->fallback_.count);
+  }
   ESP_LOGCONFIG(TAG, "  Physical lock relay: %s",
                 this->lock_linked_ ? this->linked_lock_info_.name : "Unlinked");
   if (this->keypad_battery_level_sensor_ != nullptr ||
@@ -678,6 +740,10 @@ void SwitchbotKeypadBridge::handle_command_(const FrameHeader &header, const Dec
           return;
         }
         if (this->approval_enabled_) {
+          if (!this->fallback_allows_(command)) {
+            ESP_LOGW(TAG, "Home Assistant not connected — Unlock not allowed by the fallback policy, not relayed");
+            return;
+          }
           ESP_LOGI(TAG, "Home Assistant not connected — relaying Unlock without approval (fallback)");
         }
         if (!this->relay_to_lock_async_(header, command)) {

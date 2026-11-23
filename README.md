@@ -361,6 +361,27 @@ switchbot_keypad_bridge:
           index: !lambda 'return to_string(index);'
 ```
 
+### Fallback policy
+
+What happens without Home Assistant (not connected, or no answer within
+`timeout`) can be restricted per credential. Home Assistant sends the policy
+with an API action; the bridge stores it in flash, so it also applies after a
+reboot while Home Assistant is down:
+
+```yaml
+api:
+  actions:
+    - action: set_fallback
+      variables:
+        mode: int      # 0 = relay every unlock (default), 1 = only the list, 2 = none
+        allow: string  # e.g. "fingerprint:0,face:2,pin:1" (method:index)
+      then:
+        - lambda: 'id(keypad_bridge).set_fallback(mode, allow);'
+```
+
+With mode `2` the door stays locked whenever Home Assistant cannot answer —
+keep a key or another way in.
+
 Home Assistant then answers each `esphome.switchbot_keypad_unlock` event by
 calling `esphome.<device>_approve_unlock` or `esphome.<device>_deny_unlock`
 (from an automation or an integration). Any API client counts as "connected",

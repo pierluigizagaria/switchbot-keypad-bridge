@@ -93,6 +93,13 @@ class SwitchbotKeypadBridge : public Component {
   // Release (approve) or drop (deny) the unlock waiting for approval.
   void approve();
   void deny();
+  // Fallback policy used while Home Assistant cannot answer (not connected, or
+  // no answer within the approval timeout). Persisted in NVS so it also holds
+  // after a reboot without Home Assistant.
+  //   mode 0 = relay every unlock (default), 1 = relay only credentials in
+  //   `allow_list`, 2 = relay none.
+  //   allow_list = "fingerprint:0,face:2,pin:1" (method : reported index).
+  void set_fallback(int mode, const std::string &allow_list);
 
   bool is_pairing_active() const { return this->pairing_ui_.is_running(); }
 
@@ -270,6 +277,18 @@ class SwitchbotKeypadBridge : public Component {
   // NVS, rotated by reset_pairing(). Never part of the YAML config.
   std::array<uint8_t, 16> shared_key_{};
   ESPPreferenceObject shared_key_pref_;
+
+  // Fallback policy (see set_fallback()).
+  static constexpr size_t FALLBACK_MAX = 48;
+  struct FallbackPolicy {
+    uint8_t mode{0};
+    uint8_t count{0};
+    uint8_t method[FALLBACK_MAX]{};
+    int16_t index[FALLBACK_MAX]{};
+  };
+  FallbackPolicy fallback_{};
+  ESPPreferenceObject fallback_pref_;
+  bool fallback_allows_(const DecodedCommand &command) const;
   ESPPreferenceObject keypad_name_pref_;
   ESPPreferenceObject linked_lock_pref_;
 
