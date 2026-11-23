@@ -93,6 +93,10 @@ class SwitchbotKeypadBridge : public Component {
   // Release (approve) or drop (deny) the unlock waiting for approval.
   void approve();
   void deny();
+  // Same, but only if the waiting unlock matches method ("fingerprint", …) and
+  // credential index – a late answer can never apply to a different unlock.
+  void approve(const std::string &method, int index);
+  void deny(const std::string &method, int index);
   // Fallback policy used while Home Assistant cannot answer (not connected, or
   // no answer within the approval timeout). Persisted in NVS so it also holds
   // after a reboot without Home Assistant.
@@ -318,7 +322,10 @@ class SwitchbotKeypadBridge : public Component {
     std::vector<uint8_t> plaintext;
     DecodedCommand command{};
     uint32_t deadline{0};
+    bool approved{false};       // approved, relay pending (lock relay was busy)
+    uint32_t relay_until{0};    // give up retrying the relay after this
   };
+  bool pending_matches_(const std::string &method, int index) const;
   bool approval_enabled_{false};
   uint32_t approval_timeout_ms_{2000};
   bool approval_relay_on_timeout_{true};

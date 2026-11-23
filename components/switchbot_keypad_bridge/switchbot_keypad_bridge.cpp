@@ -469,9 +469,17 @@ void SwitchbotKeypadBridge::hold_for_approval_(const FrameHeader &header, const 
 }
 
 void SwitchbotKeypadBridge::release_pending_approval_(const char *reason) {
+  ESP_LOGI(TAG, "Relaying held Unlock to the physical lock (%s)", reason);
+  if (this->lock_relay_busy_.load()) {
+    // Another relay (e.g. a Lock) is still in flight: keep the approved unlock
+    // and retry from loop() instead of dropping it.
+    this->pending_approval_.approved = true;
+    this->pending_approval_.relay_until = millis() + 5000;
+    ESP_LOGW(TAG, "Lock relay busy — will retry the approved Unlock");
+    return;
+  }
   PendingApproval p = std::move(this->pending_approval_);
   this->pending_approval_ = PendingApproval{};
-  ESP_LOGI(TAG, "Relaying held Unlock to the physical lock (%s)", reason);
   if (!this->relay_plaintext_async_(p.key_id, std::move(p.plaintext), p.command)) {
     ESP_LOGW(TAG, "Physical lock relay unavailable for the approved Unlock");
   }
@@ -479,6 +487,15 @@ void SwitchbotKeypadBridge::release_pending_approval_(const char *reason) {
 
 void SwitchbotKeypadBridge::check_pending_approval_() {
   if (!this->pending_approval_.active) {
+    return;
+  }
+  if (this->pending_approval_.approved) {
+    if (!this->lock_relay_busy_.load()) {
+      this->release_pending_approval_("retry after busy relay");
+    } else if (static_cast<int32_t>(millis() - this->pending_approval_.relay_until) >= 0) {
+      this->pending_approval_ = PendingApproval{};
+      ESP_LOGW(TAG, "Lock relay stayed busy — approved Unlock dropped");
+    }
     return;
   }
   const bool disconnected = !this->home_assistant_connected_();
@@ -549,7 +566,7 @@ void SwitchbotKeypadBridge::set_fallback(int mode, const std::string &allow_list
 }
 
 void SwitchbotKeypadBridge::approve() {
-  if (!this->pending_approval_.active) {
+  if (!this->pending_approval_.active || this->pending_approval_.approved) {
     ESP_LOGD(TAG, "Approve: no Unlock waiting");
     return;
   }
@@ -557,8 +574,31 @@ void SwitchbotKeypadBridge::approve() {
 }
 
 void SwitchbotKeypadBridge::deny() {
-  if (!this->pending_approval_.active) {
+  if (!this->pending_approval_.active || this->pending_approval_.approved) {
     ESP_LOGD(TAG, "Deny: no Unlock waiting");
+    return;
+  }
+  this->pending_approval_ = PendingApproval{};
+  ESP_LOGI(TAG, "Unlock denied by Home Assistant — not relayed");
+}
+
+bool SwitchbotKeypadBridge::pending_matches_(const std::string &method, int index) const {
+  return this->pending_approval_.active && !this->pending_approval_.approved &&
+         method == unlock_method_name(this->pending_approval_.command.method) &&
+         index == this->pending_approval_.command.credential_index;
+}
+
+void SwitchbotKeypadBridge::approve(const std::string &method, int index) {
+  if (!this->pending_matches_(method, index)) {
+    ESP_LOGW(TAG, "Approve for %s %d ignored — it does not match the waiting Unlock", method.c_str(), index);
+    return;
+  }
+  this->release_pending_approval_("approved by Home Assistant");
+}
+
+void SwitchbotKeypadBridge::deny(const std::string &method, int index) {
+  if (!this->pending_matches_(method, index)) {
+    ESP_LOGW(TAG, "Deny for %s %d ignored — it does not match the waiting Unlock", method.c_str(), index);
     return;
   }
   this->pending_approval_ = PendingApproval{};

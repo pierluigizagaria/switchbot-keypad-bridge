@@ -341,12 +341,19 @@ answer right away, so it shows success even when Home Assistant denies.
 ```yaml
 api:
   actions:
+    # method/index make sure a late answer never applies to a different unlock
     - action: approve_unlock
+      variables:
+        method: string
+        index: int
       then:
-        - switchbot_keypad_bridge.approve: keypad_bridge
+        - lambda: 'id(keypad_bridge).approve(method, index);'
     - action: deny_unlock
+      variables:
+        method: string
+        index: int
       then:
-        - switchbot_keypad_bridge.deny: keypad_bridge
+        - lambda: 'id(keypad_bridge).deny(method, index);'
 
 switchbot_keypad_bridge:
   id: keypad_bridge
@@ -384,6 +391,7 @@ keep a key or another way in.
 
 Home Assistant then answers each `esphome.switchbot_keypad_unlock` event by
 calling `esphome.<device>_approve_unlock` or `esphome.<device>_deny_unlock`
+with the event's `method` and `index`
 (from an automation or an integration). Any API client counts as "connected",
 including an open ESPHome log stream.
 
@@ -423,7 +431,8 @@ switchbot_keypad_bridge:
 
 Automation actions `switchbot_keypad_bridge.approve: <bridge_id>` and
 `switchbot_keypad_bridge.deny: <bridge_id>` release or drop the Unlock that is
-waiting for approval (see [Home Assistant approval](#-home-assistant-approval-optional)).
+waiting for approval (prefer the lambda `approve(method, index)` /
+`deny(method, index)`, which only apply to the matching unlock) (see [Home Assistant approval](#-home-assistant-approval-optional)).
 
 Automation action: `switchbot_keypad_bridge.rearm: <bridge_id>` (or
 `switchbot_keypad_bridge.rearm: {id: <bridge_id>}`) reports the emulated lock
