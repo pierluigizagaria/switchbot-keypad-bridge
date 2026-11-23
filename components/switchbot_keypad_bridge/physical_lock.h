@@ -21,6 +21,7 @@ enum class PhysicalLockModel : uint8_t {
   LOCK_VISION,
   LOCK_VISION_PRO,
   LOCK_PRO_WIFI,
+  LOCK_ULTRA_MAX,
 };
 
 const char *physical_lock_model_str(PhysicalLockModel model);
