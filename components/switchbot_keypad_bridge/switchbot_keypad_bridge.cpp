@@ -9,6 +9,9 @@
 #include <esp_random.h>
 #include <psa/crypto.h>
 
+#if __has_include("esphome/core/alloc_helpers.h") // Check if alloc_helpers.h is available
+#include "esphome/core/alloc_helpers.h"
+#endif
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "ble_utils.h"
