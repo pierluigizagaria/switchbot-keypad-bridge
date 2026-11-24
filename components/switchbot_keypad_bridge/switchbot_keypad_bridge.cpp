@@ -63,11 +63,11 @@ class SwitchbotKeypadBridge::ServerCallbacks : public NimBLEServerCallbacks {
   explicit ServerCallbacks(SwitchbotKeypadBridge *parent) : parent_(parent) {}
 
   void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override {
-    this->parent_->push_connect_();
+    this->parent_->push_connect_(info.getConnHandle());
   }
 
   void onDisconnect(NimBLEServer *server, NimBLEConnInfo &info, int reason) override {
-    this->parent_->push_disconnect_();
+    this->parent_->push_disconnect_(info.getConnHandle());
   }
 
  private:
@@ -82,7 +82,7 @@ class SwitchbotKeypadBridge::RxCharCallbacks : public NimBLECharacteristicCallba
     const std::string value = characteristic->getValue();
     if (value.empty())
       return;
-    this->parent_->push_rx_(value);
+    this->parent_->push_rx_(value, info.getConnHandle());
   }
 
  private:
@@ -105,19 +105,19 @@ class SwitchbotKeypadBridge::BatteryScanCallbacks : public NimBLEScanCallbacks {
 // Thread-safe event queueing
 // ---------------------------------------------------------------------------
 
-void SwitchbotKeypadBridge::push_connect_() {
+void SwitchbotKeypadBridge::push_connect_(uint16_t connection) {
   std::lock_guard<std::mutex> lk(this->rx_mutex_);
-  this->rx_queue_.push_back({QueuedEvent::CONNECT, ""});
+  this->rx_queue_.push_back({QueuedEvent::CONNECT, "", connection});
 }
 
-void SwitchbotKeypadBridge::push_disconnect_() {
+void SwitchbotKeypadBridge::push_disconnect_(uint16_t connection) {
   std::lock_guard<std::mutex> lk(this->rx_mutex_);
-  this->rx_queue_.push_back({QueuedEvent::DISCONNECT, ""});
+  this->rx_queue_.push_back({QueuedEvent::DISCONNECT, "", connection});
 }
 
-void SwitchbotKeypadBridge::push_rx_(const std::string &frame) {
+void SwitchbotKeypadBridge::push_rx_(const std::string &frame, uint16_t connection) {
   std::lock_guard<std::mutex> lk(this->rx_mutex_);
-  this->rx_queue_.push_back({QueuedEvent::RX, frame});
+  this->rx_queue_.push_back({QueuedEvent::RX, frame, connection});
 }
 
 // ---------------------------------------------------------------------------
@@ -262,13 +262,30 @@ void SwitchbotKeypadBridge::loop() {
   for (const auto &ev : pending) {
     if (ev.type == QueuedEvent::CONNECT) {
       ESP_LOGI(TAG, "Keypad connected");
+      if (this->keypad_gcm_enabled_) this->gcm_session_.begin(ev.connection, millis());
       this->session_.reset_transport();
     } else if (ev.type == QueuedEvent::DISCONNECT) {
       ESP_LOGI(TAG, "Keypad disconnected, restarting advertising");
+      if (this->keypad_gcm_enabled_) {
+        DecodedCommand action;
+        if (this->gcm_session_.finish(ev.connection, millis(), action) &&
+            this->keypad_paired_ && !this->lock_linked_) {
+          if (action.type == CommandType::LOCK) {
+            this->keypad_state_.rearm();
+            ESP_LOGI(TAG, "GCM Lock");
+            this->publish_lock_();
+          } else if (action.type == CommandType::UNLOCK) {
+            this->keypad_state_.unlock(millis());
+            ESP_LOGI(TAG, "GCM Unlock: method=%s index=%d",
+                     unlock_method_name(action.method), action.credential_index);
+            this->publish_unlock_(action.method, action.credential_index);
+          }
+        }
+      }
       this->session_.reset_transport();
       NimBLEDevice::startAdvertising();
     } else if (ev.type == QueuedEvent::RX) {
-      this->on_rx_frame_(ev.frame);
+      this->on_rx_frame_(ev.frame, ev.connection);
     }
   }
 
@@ -365,6 +382,12 @@ void SwitchbotKeypadBridge::apply_pending_lock_relay_() {
 }
 
 void SwitchbotKeypadBridge::reset_pairing() {
+  this->pairing_ui_.stop();
+  if (this->pairing_ui_.has_running_job() || this->lock_relay_busy_.load()) {
+    ESP_LOGW(TAG, "Reset deferred: a BLE job is running");
+    this->pairing_ui_.start();
+    return;
+  }
   ESP_LOGI(TAG, "Resetting links — rotating the shared key and re-opening the setup wizard");
 
   // Rotate the key and swap it into the live crypto slot: the previously
@@ -372,8 +395,13 @@ void SwitchbotKeypadBridge::reset_pairing() {
   this->create_shared_key_();
   if (!this->import_aes_key_()) {
     ESP_LOGE(TAG, "Key rotation failed — reset aborted");
+    this->pairing_ui_.start();
     return;
   }
+
+  this->pairing_ui_.clear_job_notifications();
+  this->pending_pair_apply_.store(false);
+  this->pending_lock_apply_.store(false);
 
   // Stop an in-flight battery scan window: the wizard's own blocking scans
   // share the NimBLE scan singleton and must not race it.
@@ -401,6 +429,7 @@ void SwitchbotKeypadBridge::reset_pairing() {
   // Invalidate any in-flight BLE session — it is keyed to the old secret —
   // and forget the learned token slot along with it.
   this->session_.reset();
+  this->gcm_session_.reset();
   this->session_.forget_slot();
   this->keypad_state_.rearm();
 
@@ -414,10 +443,6 @@ void SwitchbotKeypadBridge::reset_pairing() {
 }
 
 void ResetButton::press_action() {
-  if (this->parent_->is_pairing_active()) {
-    ESP_LOGW(TAG, "Setup wizard is already active, ignoring Reset action");
-    return;
-  }
   this->parent_->reset_pairing();
 }
 
@@ -436,6 +461,7 @@ void SwitchbotKeypadBridge::dump_config() {
   ESP_LOGCONFIG(TAG, "SwitchBot Keypad Bridge:");
   ESP_LOGCONFIG(TAG, "  BLE address: %s", NimBLEDevice::getAddress().toString().c_str());
   ESP_LOGCONFIG(TAG, "  Setup UI: port 80");
+  ESP_LOGCONFIG(TAG, "  Keypad crypto mode: %s", this->keypad_gcm_enabled_ ? "GCM" : "CTR");
   ESP_LOGCONFIG(TAG, "  Face/palm rearm after: %ums (0 = disabled)",
                 static_cast<unsigned>(this->keypad_state_.rearm_after()));
   ESP_LOGCONFIG(TAG, "  Physical lock relay: %s",
@@ -535,7 +561,19 @@ bool SwitchbotKeypadBridge::prepare_ble_() {
 // RX path
 // ---------------------------------------------------------------------------
 
-void SwitchbotKeypadBridge::on_rx_frame_(const std::string &frame) {
+void SwitchbotKeypadBridge::on_rx_frame_(const std::string &frame, uint16_t connection) {
+  if (this->keypad_gcm_enabled_) {
+    if (!this->keypad_paired_ || this->lock_linked_) return;
+    if (this->gcm_session_.process(frame, connection, millis(), this->shared_key_,
+                                  this->keypad_state_.lock_state() == KeypadState::LockState::LOCKED)) {
+      const auto &response = this->gcm_session_.response();
+      if (!this->tx_characteristic_->notify(reinterpret_cast<const uint8_t *>(response.data()),
+                                            response.size(), connection)) {
+        this->gcm_session_.reset();
+      }
+    }
+    return;
+  }
   switch (this->session_.process_frame(frame)) {
     case LockSession::Action::SEND_IV:
       this->notify_(this->session_.iv_response(), this->session_.iv_response_size());

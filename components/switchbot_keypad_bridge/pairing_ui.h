@@ -53,6 +53,7 @@ class PairingUi {
   void set_keypad_family(KeypadFamily family) {
     this->keypad_family_.store(static_cast<uint8_t>(family));
   }
+  void set_keypad_gcm_enabled(bool enabled) { this->keypad_gcm_enabled_ = enabled; }
   void set_lock_linked(bool linked) { this->lock_linked_.store(linked); }
 
   // The embedded UI page, gzip-compressed and baked into flash by codegen
@@ -79,6 +80,12 @@ class PairingUi {
   }
 
   bool is_running() const { return this->server_ != nullptr; }
+  bool has_running_job() const {
+    return this->pairer_.state() == KeypadPairer::State::RUNNING ||
+           this->linker_.state() == LockLinker::State::RUNNING;
+  }
+  void clear_job_notifications();
+
 
   // Idle shutdown: stops the server once no request has arrived for
   // `timeout_ms`. Refuses to fire while a pairing or lock-link job is still
@@ -124,6 +131,7 @@ class PairingUi {
   OnLockLinkedCallback on_lock_linked_cb_;
   std::atomic<bool> keypad_paired_{false};
   std::atomic<bool> lock_linked_{false};
+  bool keypad_gcm_enabled_{false};
   std::atomic<uint32_t> last_activity_ms_{0};
   // Identify the jobs this UI started. poll_jobs() matches Status::job_id
   // against the stored id before firing the one-shot callbacks, so a previous

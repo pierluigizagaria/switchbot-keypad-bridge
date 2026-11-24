@@ -163,6 +163,14 @@ void PairingUi::poll_jobs() {
   }
 }
 
+void PairingUi::clear_job_notifications() {
+  std::lock_guard<std::mutex> lock(this->jobs_mu_);
+  this->pairing_job_id_.clear();
+  this->link_job_id_.clear();
+  this->success_notified_ = true;
+  this->link_notified_ = true;
+}
+
 void PairingUi::touch_activity_() {
   this->last_activity_ms_.store(millis(), std::memory_order_relaxed);
 }
@@ -458,6 +466,9 @@ esp_err_t PairingUi::handle_locks_(httpd_req_t *req) {
 esp_err_t PairingUi::handle_lock_link_(httpd_req_t *req) {
   auto *self = static_cast<PairingUi *>(req->user_ctx);
   self->touch_activity_();
+  if (self->keypad_gcm_enabled_) {
+    return reply_error_(req, "409 Conflict", "GCM keypad mode supports standalone operation only.");
+  }
   std::string body = read_body_(req);
   std::string mac = extract_json_str(body, "mac");
   if (mac.empty()) {

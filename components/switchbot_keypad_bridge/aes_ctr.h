@@ -31,12 +31,20 @@ bool aes_gcm_encrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
                              const uint8_t *input, uint8_t *output,
                              size_t length, uint8_t tag[16]);
 
-// Decrypt without authenticating a received short-tag SwitchBot packet. This
-// mirrors the official clients: firmware handles acceptance and only exposes a
-// partial tag to BLE clients, so there is no complete tag to verify locally.
+// Decrypt WITHOUT authenticating a received short-tag SwitchBot packet.
+// Current client compatibility path only: no received tag is accepted by this
+// API. A server authorizing keypad commands must separately calculate and
+// verify the received two-byte prefix before releasing plaintext or acting.
 bool aes_gcm_decrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
                              const uint8_t *input, uint8_t *output,
                              size_t length);
+
+// Check the two-byte tag prefix used by the reference client framing (empty
+// AAD). Callers may consume output only on success. Failure clears output.
+// Input and output must not overlap. This provides 16-bit tag checking only.
+bool aes_gcm_decrypt_verify_prefix(const uint8_t key[16], const uint8_t nonce[12],
+                                   const uint8_t *input, uint8_t *output,
+                                   size_t length, const uint8_t (&prefix)[2]);
 
 }  // namespace switchbot_keypad_bridge
 }  // namespace esphome

@@ -2,6 +2,11 @@
 
 #include <aes/esp_aes_gcm.h>
 #include <mbedtls/gcm.h>
+#include <mbedtls/platform_util.h>
+
+extern "C" {
+#include <mbedtls/constant_time.h>
+}
 
 #include "esphome/core/log.h"
 
@@ -77,24 +82,46 @@ bool aes_gcm_encrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
   return true;
 }
 
-bool aes_gcm_decrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
-                             const uint8_t *input, uint8_t *output,
-                             size_t length) {
-  uint8_t ignored_tag[16];
+namespace {
+int gcm_decrypt_and_compute_tag(const uint8_t key[16], const uint8_t iv[12],
+                                const uint8_t *input, uint8_t *output,
+                                size_t length, uint8_t (&tag)[16]) {
   esp_gcm_context ctx;
   esp_aes_gcm_init(&ctx);
   int rc = esp_aes_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
   if (rc == 0) {
     rc = esp_aes_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_DECRYPT, length,
                                    iv, 12, nullptr, 0,
-                                   input, output, sizeof(ignored_tag), ignored_tag);
+                                   input, output, sizeof(tag), tag);
   }
   esp_aes_gcm_free(&ctx);
+  return rc;
+}
+}  // namespace
+
+bool aes_gcm_decrypt_raw_key(const uint8_t key[16], const uint8_t iv[12],
+                             const uint8_t *input, uint8_t *output,
+                             size_t length) {
+  uint8_t ignored_tag[16];
+  const int rc = gcm_decrypt_and_compute_tag(key, iv, input, output, length, ignored_tag);
   if (rc != 0) {
     ESP_LOGE(TAG, "AES-GCM decrypt failed (%d)", rc);
     return false;
   }
   return true;
+}
+
+bool aes_gcm_decrypt_verify_prefix(const uint8_t key[16], const uint8_t nonce[12],
+                                   const uint8_t *input, uint8_t *output,
+                                   size_t length, const uint8_t (&prefix)[2]) {
+  uint8_t computed_tag[16];
+  const int rc = gcm_decrypt_and_compute_tag(key, nonce, input, output, length, computed_tag);
+  const bool valid = rc == 0 && mbedtls_ct_memcmp(prefix, computed_tag, sizeof(prefix)) == 0;
+  mbedtls_platform_zeroize(computed_tag, sizeof(computed_tag));
+  if (!valid && length != 0) {
+    mbedtls_platform_zeroize(output, length);
+  }
+  return valid;
 }
 
 }  // namespace switchbot_keypad_bridge
