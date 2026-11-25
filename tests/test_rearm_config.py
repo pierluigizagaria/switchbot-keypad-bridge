@@ -35,5 +35,15 @@ class RearmConfigurationTest(unittest.TestCase):
                     bridge.CONFIG_SCHEMA({"rearm_after": value})
 
 
+class CryptoConfigurationTest(unittest.TestCase):
+    def test_default_and_opt_in(self):
+        self.assertEqual(bridge.CONFIG_SCHEMA({})["keypad_crypto_mode"], "ctr")
+        self.assertEqual(
+            bridge.CONFIG_SCHEMA({"keypad_crypto_mode": "gcm"})["keypad_crypto_mode"], "gcm"
+        )
+        with self.assertRaises(cv.Invalid):
+            bridge.CONFIG_SCHEMA({"keypad_crypto_mode": "automatic"})
+
+
 if __name__ == "__main__":
     unittest.main()

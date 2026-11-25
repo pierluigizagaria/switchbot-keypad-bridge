@@ -55,6 +55,7 @@ CONF_KEYPAD_BATTERY_LEVEL = "keypad_battery_level"
 CONF_LOCK_BATTERY_LEVEL = "lock_battery_level"
 CONF_BATTERY_SCAN_INTERVAL = "battery_scan_interval"
 CONF_REARM_AFTER = "rearm_after"
+CONF_KEYPAD_CRYPTO_MODE = "keypad_crypto_mode"
 CONF_RESET_BUTTON = "reset_button"
 CONF_ON_LOCK = "on_lock"
 CONF_ON_UNLOCK = "on_unlock"
@@ -141,6 +142,7 @@ CONFIG_SCHEMA = cv.Schema(
             cv.Range(max=TimePeriod(milliseconds=0x7FFFFFFF)),
         ),
         cv.Optional(CONF_PAIRING_UI): _deprecated_pairing_ui,
+        cv.Optional(CONF_KEYPAD_CRYPTO_MODE, default="ctr"): cv.one_of("ctr", "gcm", lower=True),
         cv.Optional(CONF_RESET_BUTTON): button.button_schema(
             ResetButton,
             entity_category=ENTITY_CATEGORY_CONFIG,
@@ -221,6 +223,7 @@ async def rearm_to_code(config, action_id, template_arg, args):
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    cg.add(var.set_keypad_gcm_enabled(config[CONF_KEYPAD_CRYPTO_MODE] == "gcm"))
     cg.add(var.set_rearm_after(config[CONF_REARM_AFTER].total_milliseconds))
 
     if keypad_conf := config.get(CONF_KEYPAD_ACTION):

@@ -25,6 +25,7 @@
 #include "lock_advert.h"
 #include "lock_protocol.h"
 #include "lock_session.h"
+#include "gcm_session.h"
 #include "nimble_compat.h"
 #include "pairing_ui.h"
 #include "physical_lock.h"
@@ -87,6 +88,10 @@ class SwitchbotKeypadBridge : public Component {
   // Forgets the linked keypad and lock, rotates the shared key in place and
   // re-opens the setup wizard — no reboot. Invoked by ResetButton.
   void reset_pairing();
+  void set_keypad_gcm_enabled(bool enabled) {
+    this->keypad_gcm_enabled_ = enabled;
+    this->pairing_ui_.set_keypad_gcm_enabled(enabled);
+  }
 
   void add_on_lock_callback(std::function<void()> &&callback) {
     this->on_lock_callbacks_.add(std::move(callback));
@@ -145,7 +150,7 @@ class SwitchbotKeypadBridge : public Component {
 
   // Validation, decryption and decoding live in LockSession; the bridge
   // dispatches the resulting Action and owns the business logic.
-  void on_rx_frame_(const std::string &frame);
+  void on_rx_frame_(const std::string &frame, uint16_t connection);
 
   void handle_command_(const FrameHeader &header, const DecodedCommand &command);
   void handle_state_poll_(const FrameHeader &header);
@@ -205,14 +210,15 @@ class SwitchbotKeypadBridge : public Component {
   struct QueuedEvent {
     enum Type { CONNECT, DISCONNECT, RX } type;
     std::string frame;
+    uint16_t connection;
   };
 
   std::mutex rx_mutex_;
   std::vector<QueuedEvent> rx_queue_;
 
-  void push_connect_();
-  void push_disconnect_();
-  void push_rx_(const std::string &frame);
+  void push_connect_(uint16_t connection);
+  void push_disconnect_(uint16_t connection);
+  void push_rx_(const std::string &frame, uint16_t connection);
 
   // ----- On-device setup wizard ----------------------------------------------
 
@@ -263,6 +269,8 @@ class SwitchbotKeypadBridge : public Component {
   // crypto). The IV may survive BLE reconnects when the keypad continues the
   // same logical session. Only ever touched from the main task.
   LockSession session_{};
+  GcmSession gcm_session_{};
+  bool keypad_gcm_enabled_{false};
 
   PhysicalLockClient physical_lock_client_{};
   LinkedLockInfo linked_lock_info_{};
