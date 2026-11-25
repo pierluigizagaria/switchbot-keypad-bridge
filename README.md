@@ -30,9 +30,12 @@ whether that lock is virtual, physical, or both.
 - 🔒 **Optional physical lock relay** — link a real SwitchBot Lock in the same
   wizard and the bridge forwards supported lock/unlock commands using the
   shared protocol key.
-- 📟 **Every SwitchBot keypad works** — Keypad, Keypad Touch, Keypad Vision and
-  Vision Pro: that's the whole lineup. Touch and Vision are tested on real
-  hardware; the other two speak the exact same protocols.
+- 📟 **Two keypad protocol families** — ORIGINAL covers Keypad and Keypad
+  Touch; VISION covers Keypad Vision and Vision Pro. Existing CTR support is
+  retained. GCM hardware testing covers Keypad Touch firmware 3.1; other
+  models and firmware need community verification.
+- 🔐 **Opt-in AES-GCM** — standalone Touch actions can use GCM with checked
+  short tags and bounded sessions. See the security limits below.
 - 📲 **On-device setup wizard** — the ESP32 serves a small web page: sign in to
   your SwitchBot account, pick the keypad, optionally link the lock, done.
 - 👤 **Knows who unlocked** — every unlock carries the method (`pin` /
@@ -52,9 +55,10 @@ whether that lock is virtual, physical, or both.
 ## 🧠 How it works
 
 A SwitchBot Keypad is not a dumb button matrix: it encrypts every command with
-AES-CTR and only talks to a device that advertises like a SwitchBot Lock,
+AES-CTR or, on supported firmware, AES-GCM. It talks to a device that
+advertises like a SwitchBot Lock,
 answers the lock GATT protocol, **and** carries a `B0:E9:FE` SwitchBot MAC.
-The bridge plays that part end to end:
+The bridge plays that part end to end. The diagram shows the default CTR path:
 
 ```mermaid
 sequenceDiagram
@@ -84,6 +88,13 @@ once, only in RAM, to install that same shared key into the lock, then verifies
 the shared-key slot. From that moment, keypad events and optional lock relay
 are local.
 
+With `keypad_crypto_mode: gcm`, the bridge verifies the received tag prefix,
+answers the action and state polls, and publishes one event after a valid
+poll and BLE disconnect. This adds latency relative to CTR's immediate
+event. The poll/disconnect requirement is a conservative completion policy;
+tag verification occurs before replying to the command. A disconnect alone
+does not prove successful keypad indication.
+
 Curious about the details — MAC spoofing, NimBLE, key rotation? See
 [Under the hood](#-under-the-hood).
 
@@ -109,6 +120,18 @@ ota_password: "a_strong_ota_password"
 pip install esphome
 esphome run switchbot-keypad-bridge.yaml
 ```
+
+For the hardware-verified standalone Keypad Touch 3.1 GCM path, add this
+option to the existing component configuration before compiling:
+
+```yaml
+switchbot_keypad_bridge:
+  keypad_crypto_mode: gcm
+```
+
+CTR remains the default. GCM uses the existing entities and callbacks.
+The tested Touch announces CTR during provisioning even with the official
+app; GCM applies to its subsequent action sessions.
 
 ### 3. Link the keypad
 
@@ -191,6 +214,13 @@ actions:
 ```
 
 ## 🔒 Physical lock relay
+
+Physical lock relay requires `keypad_crypto_mode: ctr` (the default).
+GCM currently supports standalone operation only. The wizard rejects
+physical-lock linking in GCM mode. If a lock link is already stored, the
+bridge warns and suspends GCM actions until Reset clears the link.
+Reset also clears the keypad association, so pair the keypad again afterward.
+
 
 If you also own a SwitchBot Lock, the bridge can stay in the middle instead of
 being only a virtual lock. The setup wizard lists supported locks from the same
@@ -341,6 +371,7 @@ switchbot_keypad_bridge:
 
 | Option | Type | Required | Description |
 |---|---|---|---|
+| `keypad_crypto_mode` | string | no | `ctr` (default) or `gcm`. GCM is opt-in and standalone only. Hardware verified on Keypad Touch 3.1. |
 | `keypad_action` | event | no | Standard ESPHome `event` entity for keypad actions. Surfaces in HA as `event.<device>_action` with `Lock` / `Unlock` / `Doorbell` event types. |
 | `keypad` | text_sensor | no | Diagnostic text sensor whose state is the linked keypad name, or `Unlinked` when no keypad is linked. |
 | `linked_lock` | text_sensor | no | Diagnostic text sensor whose state is the linked physical lock name, or `Unlinked` when relay mode is inactive. |
@@ -377,11 +408,30 @@ as locked and cancels pending automatic rearm. No button entity is required.
   transient setup key to provision the shared keypad/lock key, then verifies
   that shared slot. Each relayed command opens a short BLE connection and
   disconnects again using the shared key.
+- **Session ownership** — CTR keeps its existing `LockSession` behavior.
+  GCM uses `GcmSession`, bound to one BLE connection with a fresh random
+  96-bit nonce, verified request counters, cached duplicate responses and
+  one completed action per session.
+- **GCM compatibility** — ORIGINAL and VISION retain their existing pairing
+  families and known slot identifiers. VISION logs a warning in GCM mode.
+  Vision/Pro application messages, face, palm and doorbell behavior remain
+  untested in GCM; a successful handshake alone does not establish support.
+  Community testing on other models is welcome.
 - **Key hygiene** — reset rotates the shared keypad/lock session key and clears
   the linked lock record, so a previously linked keypad can no longer command
   the bridge.
 
 ## Security limits
+
+### Common limits
+
+The bridge does not require authenticated BLE pairing. Setup and stored keys
+therefore need the same care as other access-control credentials. Review
+ESPHome API encryption, OTA protection, network access and physical access
+to the ESP32. Successful hardware operation establishes functional
+compatibility; security equivalence with native devices has not been proven.
+
+### CTR limits
 
 The keypad protocol uses AES-CTR without a message authentication tag. CTR
 encryption does not prove who sent a command or detect deliberate changes to
@@ -413,6 +463,28 @@ unsupported commands and IV hand-off boundaries:
 ```sh
 sh tests/run_lock_session_tests.sh
 ```
+
+### GCM limits
+
+The observed native protocol transmits only a **16-bit authentication tag
+prefix**. The bridge verifies that prefix before accepting a request.
+This provides limited forgery resistance, far below a full-length GCM tag.
+The native exchange also uses the same key and nonce for a request and its
+reply, contrary to GCM's nonce-uniqueness requirement for distinct messages.
+This implementation reproduces that behavior for interoperability; selecting
+AES-GCM alone does not establish strong security.
+
+Each GCM connection gets a fresh random nonce. New commands advance the
+counter. The most recent exact duplicate receives the cached ciphertext;
+stale commands, invalid tags and unsupported messages invalidate the session.
+The implementation allows one action and up to sixteen polls within ten
+seconds, with a limit of three rejected sessions per sixty seconds. These
+RAM-based limits can also deny service to legitimate users.
+
+Action publication waits for a valid state poll and disconnect. These
+completion checks supplement tag verification, but do not prove that the
+keypad accepted the final reply. Some mechanical telemetry fields retain
+representative native values. See [GCM session details and tests](docs/keypad-gcm.md).
 
 ## ❓ FAQ
 
