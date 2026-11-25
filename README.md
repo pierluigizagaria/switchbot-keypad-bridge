@@ -31,9 +31,9 @@ whether that lock is virtual, physical, or both.
   wizard and the bridge forwards supported lock/unlock commands using the
   shared protocol key.
 - 📟 **Two keypad protocol families** — ORIGINAL covers Keypad and Keypad
-  Touch; VISION covers Keypad Vision and Vision Pro. Existing CTR support is
-  retained. GCM hardware testing covers Keypad Touch firmware 3.1; other
-  models and firmware need community verification.
+  Touch; VISION covers Keypad Vision and Vision Pro. CTR retains the existing
+  model compatibility. GCM model coverage is documented under
+  [Under the hood](#-under-the-hood).
 - 🔐 **Opt-in AES-GCM** — standalone Touch actions can use GCM with checked
   short tags and bounded sessions. See the security limits below.
 - 📲 **On-device setup wizard** — the ESP32 serves a small web page: sign in to
@@ -121,8 +121,8 @@ pip install esphome
 esphome run switchbot-keypad-bridge.yaml
 ```
 
-For the hardware-verified standalone Keypad Touch 3.1 GCM path, add this
-option to the existing component configuration before compiling:
+To enable standalone GCM, add this option to the existing component
+configuration before compiling:
 
 ```yaml
 switchbot_keypad_bridge:
@@ -216,7 +216,7 @@ actions:
 ## 🔒 Physical lock relay
 
 Physical lock relay requires `keypad_crypto_mode: ctr` (the default).
-GCM currently supports standalone operation only. The wizard rejects
+GCM supports standalone operation only. The wizard rejects
 physical-lock linking in GCM mode. If a lock link is already stored, the
 bridge warns and suspends GCM actions until Reset clears the link.
 Reset also clears the keypad association, so pair the keypad again afterward.
@@ -371,7 +371,7 @@ switchbot_keypad_bridge:
 
 | Option | Type | Required | Description |
 |---|---|---|---|
-| `keypad_crypto_mode` | string | no | `ctr` (default) or `gcm`. GCM is opt-in and standalone only. Hardware verified on Keypad Touch 3.1. |
+| `keypad_crypto_mode` | string | no | `ctr` (default) or `gcm`. GCM is opt-in and standalone only. See model coverage under Under the hood. |
 | `keypad_action` | event | no | Standard ESPHome `event` entity for keypad actions. Surfaces in HA as `event.<device>_action` with `Lock` / `Unlock` / `Doorbell` event types. |
 | `keypad` | text_sensor | no | Diagnostic text sensor whose state is the linked keypad name, or `Unlinked` when no keypad is linked. |
 | `linked_lock` | text_sensor | no | Diagnostic text sensor whose state is the linked physical lock name, or `Unlinked` when relay mode is inactive. |
@@ -412,11 +412,17 @@ as locked and cancels pending automatic rearm. No button entity is required.
   GCM uses `GcmSession`, bound to one BLE connection with a fresh random
   96-bit nonce, verified request counters, cached duplicate responses and
   one completed action per session.
-- **GCM compatibility** — ORIGINAL and VISION retain their existing pairing
-  families and known slot identifiers. VISION logs a warning in GCM mode.
-  Vision/Pro application messages, face, palm and doorbell behavior remain
-  untested in GCM; a successful handshake alone does not establish support.
-  Community testing on other models is welcome.
+- **GCM compatibility** — AES-GCM support has been tested on a SwitchBot
+  Keypad Touch running firmware 3.1, using an ESP32-C3 in standalone mode.
+  Verified operations include fingerprints, PIN, NFC, Lock, repeated
+  operations, restart, association persistence and reassociation.
+  GCM compatibility with other keypad models, including Keypad, Keypad Vision
+  and Vision Pro, and other firmware versions has not been verified.
+  Community testing and feedback are welcome. ORIGINAL and VISION retain
+  their existing pairing families and known slot identifiers. VISION logs a
+  warning in GCM mode. Cryptographic negotiation alone does not establish
+  application compatibility; face, palm and doorbell behavior require
+  verification on the corresponding hardware.
 - **Key hygiene** — reset rotates the shared keypad/lock session key and clears
   the linked lock record, so a previously linked keypad can no longer command
   the bridge.
@@ -484,7 +490,7 @@ RAM-based limits can also deny service to legitimate users.
 Action publication waits for a valid state poll and disconnect. These
 completion checks supplement tag verification, but do not prove that the
 keypad accepted the final reply. Some mechanical telemetry fields retain
-representative native values. GCM currently handles Lock, PIN, NFC and
+representative native values. GCM handles Lock, PIN, NFC and
 fingerprint actions. A device that negotiates GCM during provisioning
 requires further implementation and testing.
 
@@ -500,17 +506,14 @@ sh tests/run_keypad_state_tests.sh
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-For final hardware acceptance on ESP32-C3-DevKitM-1 and Keypad Touch 3.1,
-check successful keypad indication and one matching HA event for registered
-fingerprints, PIN, NFC, Lock and repeated operations. Repeat after idle and
-restart, then verify Reset with the wizard open and reassociation.
-If a physical-lock link was already stored, confirm the configuration warning
+To reproduce the hardware checks on the verified setup, check successful
+keypad indication and one matching HA event for registered fingerprints,
+PIN, NFC and Lock, including repeated operations. Restart the bridge and
+check that the saved association still works. Exercise Reset and associate
+the keypad again. Contributors can also use idle periods to check session
+expiry. If a physical-lock link is stored, confirm the configuration warning
 and suppressed GCM actions until links are reset. Shared keys and device
 identity retain their original preference records across ordinary upgrades.
-
-Functional tests passed on earlier GCM builds with this hardware. The final
-upstream candidate requires the same checks after code changes. Community
-verification of other ORIGINAL and VISION devices is welcome.
 
 ## ❓ FAQ
 
