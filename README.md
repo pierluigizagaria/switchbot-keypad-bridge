@@ -484,7 +484,33 @@ RAM-based limits can also deny service to legitimate users.
 Action publication waits for a valid state poll and disconnect. These
 completion checks supplement tag verification, but do not prove that the
 keypad accepted the final reply. Some mechanical telemetry fields retain
-representative native values. See [GCM session details and tests](docs/keypad-gcm.md).
+representative native values. GCM currently handles Lock, PIN, NFC and
+fingerprint actions. A device that negotiates GCM during provisioning
+requires further implementation and testing.
+
+GCM and CTR host session tests use simulated cryptographic functions to
+exercise session ownership, slot binding, duplicates, stale requests,
+timeouts and exactly-once completion. They do not execute the ESP-IDF
+AES backend. Python configuration checks require ESPHome.
+
+```sh
+sh tests/run_gcm_session_tests.sh
+sh tests/run_lock_session_tests.sh
+sh tests/run_keypad_state_tests.sh
+python -m unittest discover -s tests -p 'test_*.py'
+```
+
+For final hardware acceptance on ESP32-C3-DevKitM-1 and Keypad Touch 3.1,
+check successful keypad indication and one matching HA event for registered
+fingerprints, PIN, NFC, Lock and repeated operations. Repeat after idle and
+restart, then verify Reset with the wizard open and reassociation.
+If a physical-lock link was already stored, confirm the configuration warning
+and suppressed GCM actions until links are reset. Shared keys and device
+identity retain their original preference records across ordinary upgrades.
+
+Functional tests passed on earlier GCM builds with this hardware. The final
+upstream candidate requires the same checks after code changes. Community
+verification of other ORIGINAL and VISION devices is welcome.
 
 ## ❓ FAQ
 
