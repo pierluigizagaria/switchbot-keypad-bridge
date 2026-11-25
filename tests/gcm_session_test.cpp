@@ -55,6 +55,9 @@ int main() {
       assert(s.process(poll,1,100+i,key,true));
       assert(s.response().size()==18 && uint8_t(s.response()[4])==0x94);
     }
+    auto poll_repeat = packet(n+3,{0x0F,0x4F,0x81,1});
+    response = s.response();
+    assert(s.process(poll_repeat,1,200,key,true) && s.response() == response);
     DecodedCommand decoded;
     assert(s.finish(1,500,decoded));
     assert(decoded.method==static_cast<UnlockMethod>(method) && decoded.credential_index==1);
@@ -117,5 +120,19 @@ int main() {
     assert(too_many.process(packet(n+i,{0x0F,0x4F,0x81,1}),1,100+i,key,true));
   assert(!too_many.process(packet(n+17,{0x0F,0x4F,0x81,1}),1,200,key,true));
   assert(!too_many.finish(1,201,action));
+
+  // Both project family slots negotiate; pin the slot for this session.
+  GcmSession vision;
+  vision.begin(1,0);
+  auto vision_open = handshake();
+  vision_open[7] = char(0xC6);
+  assert(vision.process(vision_open,1,0,key,true));
+  n = uint8_t(vision.response()[15]);
+  auto vision_request = packet(n,{0x0F,0x4E,1,3,0x04,0x80,0x0B,0});
+  vision_request[1] = char(0xC6);
+  assert(vision.process(vision_request,1,1,key,true));
+  auto wrong_slot_poll = packet(n+1,{0x0F,0x4F,0x81,1});
+  assert(!vision.process(wrong_slot_poll,1,2,key,true));
+  assert(!vision.finish(1,3,action));
 
 }

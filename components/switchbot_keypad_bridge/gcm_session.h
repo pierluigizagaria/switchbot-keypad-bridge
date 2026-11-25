@@ -31,6 +31,7 @@ class GcmSession {
   uint32_t failures_since_{0};
   uint8_t failures_{0};
   uint8_t polls_{0};
+  uint8_t slot_{0};
   Stage stage_{Stage::HANDSHAKE};
   std::array<uint8_t, 20> handshake_{};
   std::array<uint8_t, 12> nonce_{};

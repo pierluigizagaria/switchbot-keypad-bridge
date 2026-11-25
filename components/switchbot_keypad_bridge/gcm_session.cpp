@@ -21,6 +21,7 @@ void GcmSession::reset() {
   this->connected_ = false;
   this->stage_ = Stage::HANDSHAKE;
   this->polls_ = 0;
+  this->slot_ = 0;
   this->action_ = {};
   this->last_request_.clear();
   this->response_.clear();
@@ -53,21 +54,28 @@ bool GcmSession::process(const std::string &frame, uint16_t connection, uint32_t
     return false;
   }
   const auto *wire = reinterpret_cast<const uint8_t *>(frame.data());
-  const uint8_t opening[] = {0x57, 0, 0, 0, 0x0F, 0x21, 0x03, 0x88};
-  if (frame.size() == sizeof(opening) && std::memcmp(wire, opening, sizeof(opening)) == 0) {
+  const uint8_t opening[] = {0x57, 0, 0, 0, 0x0F, 0x21, 0x03};
+  if (frame.size() == 8 && std::memcmp(wire, opening, sizeof(opening)) == 0) {
+    // The project has two protocol families. Accept both known slots;
+    // application commands on untested models still need community testing.
+    if (wire[7] != 0x88 && wire[7] != 0xC6) {
+      this->reject(now);
+      return false;
+    }
     if (this->stage_ == Stage::HANDSHAKE) {
+      this->slot_ = wire[7];
       this->handshake_ = {0x01, 0, 0x01, 0};
       esp_fill_random(this->nonce_.data(), this->nonce_.size());
       std::copy(this->nonce_.begin(), this->nonce_.end(), this->handshake_.begin() + 4);
       this->stage_ = Stage::ACTION;
-    } else if (this->stage_ != Stage::ACTION || !this->last_request_.empty()) {
+    } else if (this->stage_ != Stage::ACTION || !this->last_request_.empty() || wire[7] != this->slot_) {
       this->reject(now);
       return false;
     }
     this->response_.assign(reinterpret_cast<const char *>(this->handshake_.data()), this->handshake_.size());
     return true;
   }
-  if (this->stage_ == Stage::HANDSHAKE || frame.size() < 4 || wire[0] != 0x57 || wire[1] != 0x88) {
+  if (this->stage_ == Stage::HANDSHAKE || frame.size() < 4 || wire[0] != 0x57 || wire[1] != this->slot_) {
     this->reject(now);
     return false;
   }

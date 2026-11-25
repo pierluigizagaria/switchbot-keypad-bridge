@@ -190,6 +190,13 @@ void SwitchbotKeypadBridge::setup() {
   this->lock_linked_ = this->linked_lock_info_.valid != 0;
   this->pairing_ui_.set_lock_linked(this->lock_linked_);
   this->publish_linked_lock_();
+  if (this->keypad_gcm_enabled_ && this->lock_linked_) {
+    ESP_LOGW(TAG, "GCM requires standalone operation; action processing is disabled while a lock is linked. Use Reset to clear the link.");
+  }
+  if (this->keypad_gcm_enabled_ && this->keypad_info_.valid &&
+      static_cast<KeypadFamily>(this->keypad_info_.family) == KeypadFamily::VISION) {
+    ESP_LOGW(TAG, "GCM is hardware-verified only on Keypad Touch 3.1; Vision-family application compatibility is unverified.");
+  }
   this->battery_scan_callbacks_ = new BatteryScanCallbacks(this);
   this->next_battery_scan_at_ = millis() + BATTERY_SCAN_RETRY_MS;
   if (!this->lock_linked_) {
@@ -323,6 +330,9 @@ void SwitchbotKeypadBridge::apply_pending_pairing_() {
     this->keypad_paired_ = true;
     this->pairing_ui_.set_keypad_paired(true);
     this->pairing_ui_.set_keypad_family(this->pending_keypad_family_);
+    if (this->keypad_gcm_enabled_ && this->pending_keypad_family_ == KeypadFamily::VISION) {
+      ESP_LOGW(TAG, "GCM is hardware-verified only on Keypad Touch 3.1; Vision-family application compatibility is unverified.");
+    }
     this->last_keypad_battery_ = -1;
     // Pick the new keypad's battery up shortly, not a full interval away.
     this->next_battery_scan_at_ = millis() + 10000;
